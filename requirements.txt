@@ -1,6 +1,8 @@
 # Core LangChain framework
 langchain
 langchain-community
+langchain-core
+langchain-text-splitters
 
 # Vector database
 chromadb
@@ -26,5 +28,9 @@ python-dotenv
 # Progress bars for better UX
 tqdm
 
-# Tokenization (for OpenAI compatibility if needed)
-tiktoken
+# Hybrid Search - BM25 retriever
+rank-bm25
+
+# Scientific computing (NumPy <2.0 for sentence-transformers compatibility)
+numpy<2.0
+scikit-learn

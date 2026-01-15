@@ -1,15 +1,16 @@
 """
-Smart Pantry & Diet Guardian - Streamlit Application
+Smart Pantry & Diet Guardian - Streamlit Application (Hybrid Search Edition)
 
 This app helps you find recipes based on ingredients you have at home.
 It retrieves recipes from your local PDF cookbook database and adapts them
 to your dietary restrictions using AI.
 
 Features:
-- Ingredient-based recipe search
-- Dietary restriction filtering
-- Source transparency (shows which cookbook/page)
-- Grounded in real recipes (no hallucinations)
+- 🔄 **Hybrid Search**: Combines BM25 (keyword) + Semantic (meaning) search
+- 🎯 **RRF Fusion**: Reciprocal Rank Fusion for optimal result ranking
+- 🍳 **Ingredient-based recipe search**
+- 🥗 **Dietary restriction filtering**
+- 📚 **Source transparency** (shows which cookbook/page)
 """
 
 import streamlit as st
@@ -17,6 +18,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.retrievers import BM25Retriever
 from dotenv import load_dotenv
 import os
 
@@ -42,6 +44,12 @@ GEMINI_MODEL = "gemini-flash-latest"
 # Number of recipe chunks to retrieve from vector database
 # Higher = more context but slower, Lower = faster but might miss recipes
 NUM_RESULTS = 5
+
+# Hybrid search weights (BM25 + Semantic)
+# BM25 weight: Good for exact ingredient matches ("2 cups flour")
+# Semantic weight: Good for conceptual matches ("chicken" → "poultry")
+BM25_WEIGHT = 0.4  # Keyword search weight
+SEMANTIC_WEIGHT = 0.6  # Semantic search weight
 
 # Prompt template for recipe generation
 RECIPE_PROMPT_TEMPLATE = """
@@ -86,6 +94,43 @@ FORMAT YOUR RESPONSE AS:
 # HELPER FUNCTIONS
 # ============================================================================
 
+def reciprocal_rank_fusion(results_list, k=60):
+    """
+    Implement Reciprocal Rank Fusion (RRF) to combine multiple ranked lists.
+
+    RRF formula: score(d) = sum over all rankers r: 1 / (k + rank_r(d))
+    where k is a constant (typically 60) and rank_r(d) is the rank of document d in ranker r.
+
+    Args:
+        results_list: List of lists of Documents, each from a different retriever
+        k: Constant for RRF formula (default 60, standard in literature)
+
+    Returns:
+        list: Fused and re-ranked list of unique Documents
+    """
+    # Dictionary to store document scores: {doc_id: (score, Document)}
+    doc_scores = {}
+
+    # Process each retriever's results
+    for results in results_list:
+        for rank, doc in enumerate(results, start=1):
+            # Use doc content + metadata as unique identifier
+            doc_id = (doc.page_content, str(doc.metadata))
+
+            # Calculate RRF score for this document at this rank
+            score = 1.0 / (k + rank)
+
+            # Add score (or update if doc already seen from another retriever)
+            if doc_id in doc_scores:
+                doc_scores[doc_id] = (doc_scores[doc_id][0] + score, doc)
+            else:
+                doc_scores[doc_id] = (score, doc)
+
+    # Sort by score (descending) and return documents
+    sorted_docs = sorted(doc_scores.values(), key=lambda x: x[0], reverse=True)
+    return [doc for score, doc in sorted_docs]
+
+
 def initialize_vectorstore():
     """
     Initialize the ChromaDB vector store with the same embeddings used during ingestion.
@@ -122,6 +167,50 @@ def initialize_vectorstore():
     return vectorstore
 
 
+def initialize_hybrid_retriever(vectorstore):
+    """
+    Initialize BM25 and Semantic retrievers for hybrid search.
+
+    BM25 catches:
+    - Exact ingredient matches: "2 cups flour", "chicken breast"
+    - Specific cooking terms: "sauté", "braise"
+
+    Semantic catches:
+    - Conceptual matches: "chicken" → "poultry"
+    - Ingredient variations: "tomato" → "roma tomatoes", "cherry tomatoes"
+
+    Results are combined using RRF (Reciprocal Rank Fusion).
+
+    Args:
+        vectorstore (Chroma): Initialized vector store
+
+    Returns:
+        tuple: (bm25_retriever, semantic_retriever)
+    """
+    # Get all documents from vectorstore for BM25 indexing
+    # BM25 needs the full document corpus to calculate term frequencies
+    all_docs = vectorstore.get()['documents']
+    all_metadatas = vectorstore.get()['metadatas']
+
+    # Reconstruct Document objects from ChromaDB data
+    from langchain_core.documents import Document
+    documents = [
+        Document(page_content=doc, metadata=meta)
+        for doc, meta in zip(all_docs, all_metadatas)
+    ]
+
+    # Initialize BM25 Retriever (keyword-based)
+    bm25_retriever = BM25Retriever.from_documents(documents)
+    bm25_retriever.k = NUM_RESULTS * 2  # Get more results for better fusion
+
+    # Convert vectorstore to retriever (semantic search)
+    semantic_retriever = vectorstore.as_retriever(
+        search_kwargs={"k": NUM_RESULTS * 2}  # Get more results for better fusion
+    )
+
+    return bm25_retriever, semantic_retriever
+
+
 def initialize_llm():
     """
     Initialize Google Gemini LLM for recipe generation and adaptation.
@@ -151,16 +240,13 @@ def initialize_llm():
     return llm
 
 
-def search_recipes(vectorstore, ingredients, restrictions, num_results=NUM_RESULTS):
+def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restrictions, num_results=NUM_RESULTS):
     """
-    Search the vector database for recipes matching the ingredients.
-
-    This performs semantic search, so it understands meaning:
-    - "tomato" will match "tomatoes", "diced tomatoes", etc.
-    - "chicken breast" will match "chicken", "poultry", etc.
+    Search using hybrid retrieval (BM25 + Semantic with RRF fusion).
 
     Args:
-        vectorstore (Chroma): Vector database instance
+        bm25_retriever: BM25 keyword retriever
+        semantic_retriever: Semantic vector retriever
         ingredients (str): User's available ingredients
         restrictions (str): Dietary restrictions
         num_results (int): Number of results to retrieve
@@ -168,19 +254,20 @@ def search_recipes(vectorstore, ingredients, restrictions, num_results=NUM_RESUL
     Returns:
         list: List of Document objects with recipe chunks and metadata
     """
-    # Construct search query combining ingredients and restrictions
-    # This helps find recipes that are more likely to be adaptable
+    # Construct search query
     search_query = f"Recipes using: {ingredients}"
     if restrictions:
         search_query += f" that can be made {restrictions}"
 
-    # Perform similarity search
-    results = vectorstore.similarity_search(
-        query=search_query,
-        k=num_results
-    )
+    # Get results from both retrievers
+    bm25_results = bm25_retriever.invoke(search_query)
+    semantic_results = semantic_retriever.invoke(search_query)
 
-    return results
+    # Combine using Reciprocal Rank Fusion
+    fused_results = reciprocal_rank_fusion([bm25_results, semantic_results])
+
+    # Return top num_results
+    return fused_results[:num_results]
 
 
 def format_context(search_results):
@@ -269,11 +356,11 @@ def main():
         st.header("ℹ️ About")
         st.markdown(
             """
-            This app uses:
-            - 🔍 **Semantic Search**: Finds recipes by meaning, not just keywords
-            - 📚 **Local Database**: Your PDF cookbooks stored locally
-            - 🤖 **AI Adaptation**: Google Gemini adapts recipes to your needs
-            - 🎯 **Source Citation**: Always shows which cookbook and page
+            This app uses **Hybrid Search**:
+            - 🔤 **BM25**: Keyword matching for exact ingredients
+            - 🧠 **Semantic**: Understands meaning & synonyms
+            - 🎯 **RRF Fusion**: Combines both for best results
+            - 🤖 **AI Adaptation**: Google Gemini adapts recipes
             """
         )
 
@@ -288,10 +375,14 @@ def main():
             help="More results = more context but slower"
         )
 
+
     # Initialize components
     try:
         with st.spinner("Loading vector database..."):
             vectorstore = initialize_vectorstore()
+
+        with st.spinner("Initializing hybrid search (BM25 + Semantic + RRF)..."):
+            bm25_retriever, semantic_retriever = initialize_hybrid_retriever(vectorstore)
 
         with st.spinner("Initializing AI model..."):
             llm = initialize_llm()
@@ -342,9 +433,10 @@ def main():
             return
 
         # Show search status
-        with st.spinner("🔍 Searching cookbook database..."):
-            search_results = search_recipes(
-                vectorstore,
+        with st.spinner("🔍 Searching cookbook database with hybrid search (BM25 + Semantic + RRF)..."):
+            search_results = search_recipes_hybrid(
+                bm25_retriever,
+                semantic_retriever,
                 ingredients,
                 restrictions,
                 num_results=num_results
