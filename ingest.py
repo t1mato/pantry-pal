@@ -4,61 +4,88 @@ Smart Pantry - Document Ingestion Script
 This script processes PDF cookbooks and stores them in a local vector database (ChromaDB).
 It uses local embeddings (HuggingFace) to avoid API rate limits and costs.
 
-Usage:
-    python ingest.py [pdf_path]
+Supports both single file and batch ingestion with duplicate detection.
 
-    If no path is provided, defaults to: data/good-and-cheap-by-leanne-brown.pdf
+Usage:
+    python ingest.py [path]
+
+    path can be:
+    - A single PDF file: python ingest.py data/my-cookbook.pdf
+    - A directory: python ingest.py data/   (processes all PDFs in folder)
+    - Omitted: Uses default PDF
 
 Examples:
-    python ingest.py data/my-cookbook.pdf
-    python ingest.py  # Uses default PDF
+    python ingest.py data/my-cookbook.pdf     # Single file
+    python ingest.py data/                   # All PDFs in folder
+    python ingest.py                         # Default PDF
 """
 
-import os
 import sys
 from pathlib import Path
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 from tqdm import tqdm
 
+# Import shared config from core module
+from core import (
+    DEFAULT_PDF_PATH,
+    CHROMA_PATH,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    CHUNK_SEPARATORS,
+    BATCH_SIZE,
+    create_embeddings,
+)
+
 # Load environment variables (for future API keys if needed)
 load_dotenv()
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-# Default PDF path - can be overridden via command line argument
-DEFAULT_PDF_PATH = "data/good-and-cheap-by-leanne-brown.pdf"
-
-# Vector database storage location
-CHROMA_DB_PATH = "./chroma_db"
-
-# Text splitting configuration
-# - chunk_size: Maximum characters per chunk (larger = more context, but less precise matching)
-# - chunk_overlap: Characters shared between chunks (prevents splitting mid-recipe)
-# - separators: Split preferentially on these patterns to preserve recipe structure
-CHUNK_SIZE = 2000
-CHUNK_OVERLAP = 200
-CHUNK_SEPARATORS = ["\n\n", "Title:", "Ingredients:"]
-
-# Embedding model configuration
-# all-MiniLM-L6-v2: Fast, lightweight, runs locally, no API costs
-# - 384 dimensions (vs Google's 768, but sufficient for recipe matching)
-# - ~120MB model size (downloads on first run)
-# - Good balance of speed and quality for semantic search
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-
-# Batch size for processing chunks (lower = less memory, more progress updates)
-BATCH_SIZE = 50
 
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+def discover_pdfs(input_path):
+    """
+    Discover PDF files from a file path or directory.
+
+    This enables batch ingestion: pass a folder and all PDFs are found.
+
+    Args:
+        input_path (str): Path to a PDF file or directory containing PDFs
+
+    Returns:
+        list[Path]: List of validated PDF file paths
+
+    Raises:
+        FileNotFoundError: If the path doesn't exist
+        ValueError: If no PDFs are found
+    """
+    path = Path(input_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"Path not found: {input_path}")
+
+    if path.is_file():
+        # Single file mode
+        if path.suffix.lower() != '.pdf':
+            raise ValueError(f"File is not a PDF: {input_path}")
+        return [path]
+
+    if path.is_dir():
+        # Batch mode — find all PDFs in directory
+        pdfs = sorted(path.glob("*.pdf"))
+        if not pdfs:
+            raise ValueError(f"No PDF files found in directory: {input_path}")
+        print(f"📁 Found {len(pdfs)} PDF(s) in {input_path}")
+        for pdf in pdfs:
+            print(f"   - {pdf.name}")
+        return pdfs
+
+    raise ValueError(f"Path is neither a file nor a directory: {input_path}")
+
 
 def validate_pdf_path(pdf_path):
     """
@@ -86,6 +113,36 @@ def validate_pdf_path(pdf_path):
         raise ValueError(f"File is not a PDF: {pdf_path}")
 
     return path
+
+
+def get_ingested_sources():
+    """
+    Check which PDF sources are already in the vector database.
+
+    Reads metadata from ChromaDB to determine which files have been
+    ingested. This prevents duplicate ingestion when re-running the script.
+
+    Returns:
+        set[str]: Set of source filenames already in the database.
+                  Empty set if database doesn't exist yet.
+    """
+    if not Path(CHROMA_PATH).exists():
+        return set()
+
+    try:
+        embeddings = create_embeddings()
+        vectorstore = Chroma(
+            persist_directory=CHROMA_PATH,
+            embedding_function=embeddings
+        )
+        # Get all metadata from the database
+        all_metadatas = vectorstore.get()['metadatas']
+        # Extract unique source filenames
+        sources = {meta.get('source', '') for meta in all_metadatas}
+        return sources
+    except Exception:
+        # If database is corrupted or unreadable, start fresh
+        return set()
 
 
 def load_pdf_documents(pdf_path):
@@ -148,29 +205,19 @@ def split_documents(docs):
 
 def initialize_embeddings():
     """
-    Initializes the local embedding model.
+    Initialize the local embedding model using the shared core configuration.
 
-    This uses HuggingFace's sentence-transformers library to run embeddings
-    locally. The model will be downloaded to ~/.cache/huggingface on first run.
-
-    Benefits:
-    - No API costs
-    - No rate limits
-    - Data privacy (nothing sent to external servers)
-    - Offline capability
+    This is a thin wrapper around core.create_embeddings() that adds
+    user-friendly console output for the ingestion process.
 
     Returns:
         HuggingFaceEmbeddings: Embedding model instance
     """
-    print(f"\n🤖 Initializing local embedding model: {EMBEDDING_MODEL}")
+    print("\n🤖 Initializing local embedding model...")
     print("   (First run will download ~120MB model)")
 
-    # Set model_kwargs to use CPU (change to {"device": "cuda"} if GPU available)
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}  # Normalize for better similarity search
-    )
+    # Use shared embedding configuration from core
+    embeddings = create_embeddings()
 
     print("✓ Embedding model ready")
     return embeddings
@@ -180,9 +227,8 @@ def store_in_vectordb(splits, embeddings):
     """
     Stores document chunks in ChromaDB with embeddings.
 
-    This creates vector embeddings for each chunk and stores them in a local
-    SQLite database. The embeddings enable semantic search (finding recipes by
-    meaning, not just keyword matching).
+    Uses add_documents() to append to an existing database instead of
+    overwriting. This enables batch ingestion of multiple PDFs.
 
     Args:
         splits (list): Document chunks to embed and store
@@ -191,19 +237,19 @@ def store_in_vectordb(splits, embeddings):
     Returns:
         Chroma: Vector store instance
     """
-    print(f"\n💾 Storing chunks in vector database: {CHROMA_DB_PATH}")
+    print(f"\n💾 Storing chunks in vector database: {CHROMA_PATH}")
     print(f"   Processing {len(splits)} chunks in batches of {BATCH_SIZE}...")
 
     try:
-        # Process all documents at once with progress bar
-        # ChromaDB handles batching internally, but we show progress
+        # Connect to existing database or create new one
+        vectorstore = Chroma(
+            persist_directory=CHROMA_PATH,
+            embedding_function=embeddings
+        )
+
+        # Append documents (doesn't overwrite existing data)
         with tqdm(total=len(splits), desc="Embedding & storing", unit="chunk") as pbar:
-            # Create vector store (this embeds all documents)
-            vectorstore = Chroma.from_documents(
-                documents=splits,
-                embedding=embeddings,
-                persist_directory=CHROMA_DB_PATH
-            )
+            vectorstore.add_documents(documents=splits)
             pbar.update(len(splits))
 
         print(f"✓ Successfully stored {len(splits)} chunks")
@@ -217,54 +263,87 @@ def store_in_vectordb(splits, embeddings):
 # MAIN EXECUTION
 # ============================================================================
 
+def ingest_single_pdf(pdf_path, embeddings):
+    """
+    Ingest a single PDF: load, split, embed, and store.
+
+    Args:
+        pdf_path (Path): Validated path to PDF file
+        embeddings: Initialized embedding model
+
+    Returns:
+        tuple: (num_pages, num_chunks) for statistics
+    """
+    docs = load_pdf_documents(pdf_path)
+    splits = split_documents(docs)
+    _ = store_in_vectordb(splits, embeddings)
+    return len(docs), len(splits)
+
+
 def main():
     """
-    Main execution function.
+    Main execution function with batch support.
 
     Workflow:
-    1. Parse command line arguments
-    2. Validate PDF exists
-    3. Load and parse PDF
-    4. Split into chunks
-    5. Initialize embedding model
-    6. Store in vector database
+    1. Parse command line arguments (file or directory)
+    2. Discover PDFs to process
+    3. Check for already-ingested files (deduplication)
+    4. Initialize embedding model (once, shared across all PDFs)
+    5. Process each PDF: load → split → embed → store (skip duplicates)
+    6. Report batch statistics
     """
     print("=" * 70)
     print("🍳 Smart Pantry - Document Ingestion")
     print("=" * 70)
 
-    # Step 1: Get PDF path from command line or use default
+    # Step 1: Get path from command line or use default
     if len(sys.argv) > 1:
-        pdf_path = sys.argv[1]
-        print(f"Using PDF from command line: {pdf_path}")
+        input_path = sys.argv[1]
+        print(f"Input path: {input_path}")
     else:
-        pdf_path = DEFAULT_PDF_PATH
-        print(f"Using default PDF: {pdf_path}")
+        input_path = DEFAULT_PDF_PATH
+        print(f"Using default: {input_path}")
 
     try:
-        # Step 2: Validate PDF exists and is readable
-        pdf_path = validate_pdf_path(pdf_path)
+        # Step 2: Discover PDFs (works with files and directories)
+        pdf_paths = discover_pdfs(input_path)
 
-        # Step 3: Load PDF documents
-        docs = load_pdf_documents(pdf_path)
+        # Step 3: Check which sources are already ingested
+        existing_sources = get_ingested_sources()
+        if existing_sources:
+            print(f"\n📋 Already in database: {len(existing_sources)} source(s)")
 
-        # Step 4: Split documents into chunks
-        splits = split_documents(docs)
-
-        # Step 5: Initialize local embedding model
+        # Step 4: Initialize embedding model ONCE (shared across all PDFs)
         embeddings = initialize_embeddings()
 
-        # Step 6: Store in ChromaDB
-        vectorstore = store_in_vectordb(splits, embeddings)
+        # Step 5: Process each PDF
+        total_pages = 0
+        total_chunks = 0
+        skipped = 0
+        processed = 0
 
-        # Success!
+        for pdf_path in pdf_paths:
+            # Deduplication: skip PDFs already in the database
+            if str(pdf_path) in existing_sources:
+                print(f"\nSkipping {pdf_path.name} (already ingested)")
+                skipped += 1
+                continue
+
+            pages, chunks = ingest_single_pdf(pdf_path, embeddings)
+            total_pages += pages
+            total_chunks += chunks
+            processed += 1
+
+        # Step 6: Report results
         print("\n" + "=" * 70)
         print("✅ SUCCESS!")
         print("=" * 70)
-        print(f"📊 Statistics:")
-        print(f"   - Pages processed: {len(docs)}")
-        print(f"   - Chunks created: {len(splits)}")
-        print(f"   - Database location: {CHROMA_DB_PATH}")
+        print(f"📊 Batch Statistics:")
+        print(f"   - PDFs processed: {processed}")
+        print(f"   - PDFs skipped (already ingested): {skipped}")
+        print(f"   - Total pages: {total_pages}")
+        print(f"   - Total chunks: {total_chunks}")
+        print(f"   - Database location: {CHROMA_PATH}")
         print(f"\n💡 Next step: Run 'streamlit run app.py' to query your recipes!")
         print("=" * 70)
 

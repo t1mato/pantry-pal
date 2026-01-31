@@ -14,51 +14,35 @@ Features:
 """
 
 import streamlit as st
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.retrievers import BM25Retriever
 from dotenv import load_dotenv
 import os
+
+# Import shared utilities from core module
+from core import (
+    # Config
+    NUM_RESULTS,
+    GEMINI_MODEL,
+    GEMINI_TEMPERATURE,
+
+    # Embeddings & vectorstore
+    initialize_vectorstore,
+    initialize_hybrid_retriever,
+
+    # Retrieval
+    search_hybrid,
+    format_context,
+)
 
 # Load environment variables
 load_dotenv()
 
 # ============================================================================
-# CONFIGURATION
+# UI-SPECIFIC CONFIGURATION
 # ============================================================================
 
-# Vector database path (must match ingest.py)
-CHROMA_PATH = "./chroma_db"
-
-# Embedding model (MUST match the model used in ingest.py)
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-
-# LLM configuration
-# Using Google Gemini Flash (latest version) for recipe generation
-# "gemini-flash-latest" automatically uses the newest flash model available
-# Your API key has access to gemini-2.5-flash and newer models
-GEMINI_MODEL = "gemini-flash-latest"
-
-# Number of recipe chunks to retrieve from vector database
-# Higher = more context but slower, Lower = faster but might miss recipes
-NUM_RESULTS = 5
-
-# Hybrid search weights (BM25 + Semantic)
-# BM25 weight: Good for exact ingredient matches ("2 cups flour")
-# Semantic weight: Good for conceptual matches ("chicken" → "poultry")
-BM25_WEIGHT = 0.4  # Keyword search weight
-SEMANTIC_WEIGHT = 0.6  # Semantic search weight
-
-# Cross-Encoder Reranking
-# Reranks top results using a more powerful model that understands query-document relationships
-# Model: ms-marco-MiniLM-L-6-v2 - trained on Microsoft MARCO passage ranking dataset
-# Trade-off: ~100ms latency increase for significantly better precision
-CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-RERANK_TOP_K = 10  # Retrieve more candidates for reranking, return top NUM_RESULTS
-
-# Prompt template for recipe generation
+# Prompt template for recipe generation (UI-specific, not shared with evaluation)
 RECIPE_PROMPT_TEMPLATE = """
 You are a helpful cooking assistant. Based on the recipe context provided below,
 create a recipe recommendation that uses the user's available ingredients and
@@ -98,167 +82,8 @@ FORMAT YOUR RESPONSE AS:
 
 
 # ============================================================================
-# HELPER FUNCTIONS
+# LLM FUNCTIONS (app-specific, not shared)
 # ============================================================================
-
-def reciprocal_rank_fusion(results_list, k=60):
-    """
-    Implement Reciprocal Rank Fusion (RRF) to combine multiple ranked lists.
-
-    RRF formula: score(d) = sum over all rankers r: 1 / (k + rank_r(d))
-    where k is a constant (typically 60) and rank_r(d) is the rank of document d in ranker r.
-
-    Args:
-        results_list: List of lists of Documents, each from a different retriever
-        k: Constant for RRF formula (default 60, standard in literature)
-
-    Returns:
-        list: Fused and re-ranked list of unique Documents
-    """
-    # Dictionary to store document scores: {doc_id: (score, Document)}
-    doc_scores = {}
-
-    # Process each retriever's results
-    for results in results_list:
-        for rank, doc in enumerate(results, start=1):
-            # Use doc content + metadata as unique identifier
-            doc_id = (doc.page_content, str(doc.metadata))
-
-            # Calculate RRF score for this document at this rank
-            score = 1.0 / (k + rank)
-
-            # Add score (or update if doc already seen from another retriever)
-            if doc_id in doc_scores:
-                doc_scores[doc_id] = (doc_scores[doc_id][0] + score, doc)
-            else:
-                doc_scores[doc_id] = (score, doc)
-
-    # Sort by score (descending) and return documents
-    sorted_docs = sorted(doc_scores.values(), key=lambda x: x[0], reverse=True)
-    return [doc for score, doc in sorted_docs]
-
-
-def rerank_with_cross_encoder(query: str, documents: list, top_k: int = NUM_RESULTS):
-    """
-    Rerank documents using a cross-encoder model for improved precision.
-
-    Cross-encoders are more accurate than bi-encoders (embeddings) because they:
-    - Process query + document together (not separately)
-    - Capture fine-grained interactions between query and document
-    - Trained specifically on relevance ranking tasks
-
-    Trade-off: Slower than embeddings (~100ms for 10 docs) but much better accuracy.
-
-    Args:
-        query (str): User's search query
-        documents (list): List of Document objects to rerank
-        top_k (int): Number of top documents to return after reranking
-
-    Returns:
-        list: Top-k documents sorted by relevance score (highest first)
-    """
-    if not documents:
-        return []
-
-    # Lazy import to avoid loading model on startup
-    from sentence_transformers import CrossEncoder
-
-    # Load cross-encoder model (cached after first load)
-    cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL)
-
-    # Create query-document pairs for scoring
-    pairs = [[query, doc.page_content] for doc in documents]
-
-    # Score all pairs (returns relevance scores)
-    scores = cross_encoder.predict(pairs)
-
-    # Combine scores with documents and sort by score (descending)
-    doc_score_pairs = list(zip(documents, scores))
-    doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
-
-    # Return top-k documents
-    return [doc for doc, score in doc_score_pairs[:top_k]]
-
-
-def initialize_vectorstore():
-    """
-    Initialize the ChromaDB vector store with the same embeddings used during ingestion.
-
-    CRITICAL: The embedding model MUST match the one used in ingest.py.
-    Mismatched embeddings will result in nonsensical similarity scores.
-
-    Returns:
-        Chroma: Vector store instance, or None if database doesn't exist
-
-    Raises:
-        FileNotFoundError: If ChromaDB hasn't been initialized yet
-    """
-    # Check if database exists
-    if not os.path.exists(CHROMA_PATH):
-        raise FileNotFoundError(
-            f"Vector database not found at {CHROMA_PATH}. "
-            f"Please run 'python ingest.py' first to create it."
-        )
-
-    # Initialize the same embedding model used during ingestion
-    embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-
-    # Load existing vector store
-    vectorstore = Chroma(
-        persist_directory=CHROMA_PATH,
-        embedding_function=embeddings
-    )
-
-    return vectorstore
-
-
-def initialize_hybrid_retriever(vectorstore):
-    """
-    Initialize BM25 and Semantic retrievers for hybrid search.
-
-    BM25 catches:
-    - Exact ingredient matches: "2 cups flour", "chicken breast"
-    - Specific cooking terms: "sauté", "braise"
-
-    Semantic catches:
-    - Conceptual matches: "chicken" → "poultry"
-    - Ingredient variations: "tomato" → "roma tomatoes", "cherry tomatoes"
-
-    Results are combined using RRF (Reciprocal Rank Fusion).
-
-    Args:
-        vectorstore (Chroma): Initialized vector store
-
-    Returns:
-        tuple: (bm25_retriever, semantic_retriever)
-    """
-    # Get all documents from vectorstore for BM25 indexing
-    # BM25 needs the full document corpus to calculate term frequencies
-    all_docs = vectorstore.get()['documents']
-    all_metadatas = vectorstore.get()['metadatas']
-
-    # Reconstruct Document objects from ChromaDB data
-    from langchain_core.documents import Document
-    documents = [
-        Document(page_content=doc, metadata=meta)
-        for doc, meta in zip(all_docs, all_metadatas)
-    ]
-
-    # Initialize BM25 Retriever (keyword-based)
-    bm25_retriever = BM25Retriever.from_documents(documents)
-    bm25_retriever.k = NUM_RESULTS * 2  # Get more results for better fusion
-
-    # Convert vectorstore to retriever (semantic search)
-    semantic_retriever = vectorstore.as_retriever(
-        search_kwargs={"k": NUM_RESULTS * 2}  # Get more results for better fusion
-    )
-
-    return bm25_retriever, semantic_retriever
-
 
 def initialize_llm():
     """
@@ -282,7 +107,7 @@ def initialize_llm():
     # Initialize Gemini with temperature for creative recipe adaptation
     llm = ChatGoogleGenerativeAI(
         model=GEMINI_MODEL,
-        temperature=0.3,  # Low temp for consistent, factual responses
+        temperature=GEMINI_TEMPERATURE,
         google_api_key=api_key
     )
 
@@ -292,9 +117,11 @@ def initialize_llm():
 def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restrictions,
                          num_results=NUM_RESULTS, use_reranking=False):
     """
-    Search using hybrid retrieval (BM25 + Semantic with RRF fusion).
+    Search for recipes using hybrid retrieval.
 
-    Optionally applies cross-encoder reranking for improved precision.
+    This is a thin wrapper around core.search_hybrid that:
+    1. Constructs a recipe-specific query from ingredients + restrictions
+    2. Delegates to the core search function
 
     Args:
         bm25_retriever: BM25 keyword retriever
@@ -307,56 +134,19 @@ def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restr
     Returns:
         list: List of Document objects with recipe chunks and metadata
     """
-    # Construct search query
-    search_query = f"Recipes using: {ingredients}"
+    # Construct recipe-specific search query
+    query = f"Recipes using: {ingredients}"
     if restrictions:
-        search_query += f" that can be made {restrictions}"
+        query += f" that can be made {restrictions}"
 
-    # Get results from both retrievers
-    bm25_results = bm25_retriever.invoke(search_query)
-    semantic_results = semantic_retriever.invoke(search_query)
-
-    # Combine using Reciprocal Rank Fusion
-    fused_results = reciprocal_rank_fusion([bm25_results, semantic_results])
-
-    # Apply cross-encoder reranking if enabled
-    if use_reranking:
-        # Get more candidates for reranking, then select top num_results
-        candidates = fused_results[:RERANK_TOP_K]
-        return rerank_with_cross_encoder(search_query, candidates, top_k=num_results)
-    else:
-        # Return top num_results directly
-        return fused_results[:num_results]
-
-
-def format_context(search_results):
-    """
-    Format search results into a context string for the LLM prompt.
-
-    Includes both the recipe text and metadata (source, page number).
-
-    Args:
-        search_results (list): List of Document objects from vector search
-
-    Returns:
-        str: Formatted context string
-    """
-    context_parts = []
-
-    for i, doc in enumerate(search_results, 1):
-        # Extract metadata
-        source = doc.metadata.get('source', 'Unknown source')
-        page = doc.metadata.get('page', 'Unknown page')
-
-        # Format this result
-        context_parts.append(
-            f"--- Recipe Chunk {i} ---\n"
-            f"Source: {source}\n"
-            f"Page: {page}\n"
-            f"Content:\n{doc.page_content}\n"
-        )
-
-    return "\n".join(context_parts)
+    # Delegate to core search function
+    return search_hybrid(
+        bm25_retriever,
+        semantic_retriever,
+        query,
+        num_results=num_results,
+        use_reranking=use_reranking
+    )
 
 
 def generate_recipe(llm, context, ingredients, restrictions):

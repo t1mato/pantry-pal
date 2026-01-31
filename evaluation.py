@@ -18,15 +18,12 @@ Compares:
 
 import os
 import sys
-from typing import List, Dict
+from typing import List
 from dataclasses import dataclass
 import pandas as pd
 from datetime import datetime
 
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain_chroma import Chroma
-from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from dotenv import load_dotenv
 
@@ -44,19 +41,24 @@ from datasets import Dataset
 
 load_dotenv()
 
-# Import from app.py
-from app import (
+# Import shared utilities from core module (decoupled from app.py!)
+from core import (
+    # Config
     CHROMA_PATH,
-    EMBEDDING_MODEL,
     GEMINI_MODEL,
-    reciprocal_rank_fusion,
-    rerank_with_cross_encoder,
+
+    # Embeddings & vectorstore
     initialize_vectorstore,
     initialize_hybrid_retriever,
-    initialize_llm,
+
+    # Retrieval
+    reciprocal_rank_fusion,
+    rerank_with_cross_encoder,
     format_context,
-    generate_recipe
 )
+
+# Import LLM-specific functions from app (these are UI-related)
+from app import initialize_llm, generate_recipe
 
 
 # ============================================================================
