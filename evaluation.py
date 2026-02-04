@@ -41,7 +41,7 @@ from datasets import Dataset
 
 load_dotenv()
 
-# Import shared utilities from core module (decoupled from app.py!)
+# Import shared utilities from core module
 from core import (
     # Config
     CHROMA_PATH,
@@ -55,10 +55,11 @@ from core import (
     reciprocal_rank_fusion,
     rerank_with_cross_encoder,
     format_context,
-)
 
-# Import LLM-specific functions from app (these are UI-related)
-from app import initialize_llm, generate_recipe
+    # LLM (now in core/llm.py — no longer imports from app.py!)
+    initialize_llm,
+    generate_recipe,
+)
 
 
 # ============================================================================

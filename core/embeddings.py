@@ -96,8 +96,9 @@ def initialize_hybrid_retriever(vectorstore: Chroma) -> Tuple:
     """
     # Extract all documents from vectorstore for BM25 indexing
     # BM25 needs the full corpus to calculate term frequencies (TF-IDF)
-    all_docs = vectorstore.get()['documents']
-    all_metadatas = vectorstore.get()['metadatas']
+    all_data = vectorstore.get()
+    all_docs = all_data['documents']
+    all_metadatas = all_data['metadatas']
 
     # Reconstruct Document objects
     documents = [

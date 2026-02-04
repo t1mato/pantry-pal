@@ -24,7 +24,10 @@ Three-phase RAG system with rigorous RAGAS evaluation:
 
 - **Hybrid Search:** Combines keyword matching (BM25) with semantic understanding
 - **Cross-Encoder Reranking:** Improves answer relevancy from 53.4% → 59.5%
+- **Batch Ingestion:** Process entire folders of PDFs with duplicate detection
+- **Modular Architecture:** Shared `core/` module with centralized config
 - **RAGAS Evaluation:** 4 metrics (Context Precision, Context Recall, Faithfulness, Answer Relevancy)
+- **Unit Tests:** pytest suite for core retrieval algorithms
 - **Perfect Recall:** 100% - users won't miss relevant recipes
 - **Debug Mode:** View raw retrieval results without LLM generation
 
@@ -48,9 +51,10 @@ pip install -r requirements.txt
 echo "GOOGLE_API_KEY=<your-key>" > .env
 echo "GROQ_API_KEY=<your-key>" >> .env  # Optional: for evaluation only
 
-# Ingest PDFs
-python ingest.py                      # Default: data/good-and-cheap-by-leanne-brown.pdf
-python ingest.py data/cookbook.pdf    # Custom PDF
+# Ingest PDFs (single file or batch)
+python ingest.py                         # Default PDF
+python ingest.py data/cookbook.pdf        # Single file
+python ingest.py data/                   # All PDFs in folder (batch mode)
 
 # Run application
 streamlit run app.py
@@ -83,10 +87,19 @@ python evaluation.py
 
 ```
 smart-pantry/
-├── app.py                      # Streamlit UI + hybrid search + reranking
-├── ingest.py                   # PDF processing + embedding generation
+├── core/                       # Shared utilities module
+│   ├── __init__.py             # Package exports
+│   ├── config.py               # Centralized configuration (single source of truth)
+│   ├── embeddings.py           # Embedding model + vectorstore initialization
+│   └── retrieval.py            # RRF fusion, cross-encoder reranking, search
+├── tests/                      # pytest test suite
+│   ├── conftest.py             # Shared fixtures (mock recipe data)
+│   └── test_retrieval.py       # Tests for RRF and format_context
+├── app.py                      # Streamlit UI + LLM generation
+├── ingest.py                   # PDF processing + batch ingestion + deduplication
 ├── evaluation.py               # RAGAS evaluation framework
 ├── requirements.txt            # Python dependencies
+├── pytest.ini                  # Test configuration
 ├── .env                        # API credentials (gitignored)
 ├── data/                       # Source PDFs (gitignored)
 ├── chroma_db/                  # Vector database (gitignored)
@@ -97,23 +110,34 @@ smart-pantry/
 
 ## Configuration
 
-### ingest.py
-- `CHUNK_SIZE`: 2000
-- `CHUNK_OVERLAP`: 200
-- `EMBEDDING_MODEL`: "all-MiniLM-L6-v2"
+All configuration is centralized in `core/config.py` (single source of truth):
+
+### Embeddings & Chunking
+- `EMBEDDING_MODEL`: "all-MiniLM-L6-v2" (shared across all modules)
+- `CHUNK_SIZE`: 2000 / `CHUNK_OVERLAP`: 200
 - `CHUNK_SEPARATORS`: `["\n\n", "Title:", "Ingredients:"]`
 
-### app.py
-- `GEMINI_MODEL`: "gemini-flash-latest"
+### Retrieval
 - `NUM_RESULTS`: 5 (final results returned)
 - `RERANK_TOP_K`: 10 (candidates for reranking)
 - `CROSS_ENCODER_MODEL`: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-- `EMBEDDING_MODEL`: Must match ingest.py
 
-### evaluation.py
-- `TEST_CASES`: 3 recipe queries (expand to 20+ for production)
+### LLM & Evaluation
+- `GEMINI_MODEL`: "gemini-flash-latest"
 - `GROQ_MODEL`: "llama-3.1-8b-instant"
 - Evaluates 4 methods: Semantic Only, BM25 Only, Hybrid (RRF), Hybrid + Reranking
+
+## Testing
+
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test class
+python -m pytest tests/test_retrieval.py::TestReciprocalRankFusion -v
+```
+
+11 unit tests covering RRF fusion and context formatting.
 
 ## Troubleshooting
 

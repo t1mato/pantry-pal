@@ -68,6 +68,10 @@ def reciprocal_rank_fusion(
     return [doc for _, doc in sorted_docs]
 
 
+# Module-level cache for cross-encoder models.
+_cross_encoder_cache = {}
+
+
 def rerank_with_cross_encoder(
     query: str,
     documents: List[Document],
@@ -95,8 +99,8 @@ def rerank_with_cross_encoder(
         Top-k documents sorted by cross-encoder relevance score
 
     Note:
-        Model is loaded lazily (on first call) and cached for subsequent calls.
-        First call may take 1-2 seconds for model loading.
+        Model is loaded lazily (on first call) and cached in _cross_encoder_cache
+        for subsequent calls. First call may take 1-2 seconds for model loading.
     """
     if not documents:
         return []
@@ -104,8 +108,11 @@ def rerank_with_cross_encoder(
     # Lazy import to avoid loading model when not needed
     from sentence_transformers import CrossEncoder
 
-    # Load cross-encoder (cached after first load)
-    cross_encoder = CrossEncoder(model_name)
+    if model_name in _cross_encoder_cache:
+        cross_encoder = _cross_encoder_cache[model_name]
+    else:
+        cross_encoder = CrossEncoder(model_name)
+        _cross_encoder_cache[model_name] = cross_encoder
 
     # Create query-document pairs for scoring
     pairs = [[query, doc.page_content] for doc in documents]

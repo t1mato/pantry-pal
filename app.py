@@ -14,17 +14,11 @@ Features:
 """
 
 import streamlit as st
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
-from dotenv import load_dotenv
-import os
 
 # Import shared utilities from core module
 from core import (
     # Config
     NUM_RESULTS,
-    GEMINI_MODEL,
-    GEMINI_TEMPERATURE,
 
     # Embeddings & vectorstore
     initialize_vectorstore,
@@ -33,86 +27,33 @@ from core import (
     # Retrieval
     search_hybrid,
     format_context,
+
+    # LLM (shared with evaluation.py via core/)
+    initialize_llm,
+    generate_recipe,
 )
 
-# Load environment variables
-load_dotenv()
-
 # ============================================================================
-# UI-SPECIFIC CONFIGURATION
+# CACHED INITIALIZATION (persist across Streamlit re-renders)
 # ============================================================================
 
-# Prompt template for recipe generation (UI-specific, not shared with evaluation)
-RECIPE_PROMPT_TEMPLATE = """
-You are a helpful cooking assistant. Based on the recipe context provided below,
-create a recipe recommendation that uses the user's available ingredients and
-respects their dietary restrictions.
+@st.cache_resource
+def get_search_components():
+    """Load vectorstore and build hybrid retrievers (cached across re-renders)."""
+    vectorstore = initialize_vectorstore()
+    bm25_retriever, semantic_retriever = initialize_hybrid_retriever(vectorstore)
+    return bm25_retriever, semantic_retriever
 
-RECIPE CONTEXT (from cookbooks):
-{context}
 
-USER'S INGREDIENTS:
-{ingredients}
-
-DIETARY RESTRICTIONS:
-{restrictions}
-
-INSTRUCTIONS:
-1. If the context contains recipes that match the ingredients, recommend the best one
-2. Adapt the recipe if needed to respect dietary restrictions
-3. If no exact match exists, suggest the closest recipe and explain substitutions
-4. Always cite the source (cookbook and page number from the context metadata)
-5. Be specific about measurements and cooking steps
-6. If restrictions make a recipe impossible (e.g., vegan cake with eggs), say so honestly
-
-FORMAT YOUR RESPONSE AS:
-📖 **Recipe Name**
-🏷️ *Source: [Cookbook name, Page X]*
-
-**Ingredients:**
-- [List ingredients with measurements]
-
-**Instructions:**
-1. [Step-by-step instructions]
-
-**Notes:**
-- [Any substitutions made for dietary restrictions]
-- [Tips or warnings]
-"""
+@st.cache_resource
+def get_llm():
+    """Initialize the Gemini LLM client (cached across re-renders)."""
+    return initialize_llm()
 
 
 # ============================================================================
-# LLM FUNCTIONS (app-specific, not shared)
+# SEARCH FUNCTIONS
 # ============================================================================
-
-def initialize_llm():
-    """
-    Initialize Google Gemini LLM for recipe generation and adaptation.
-
-    Requires GOOGLE_API_KEY in environment variables.
-
-    Returns:
-        ChatGoogleGenerativeAI: LLM instance
-
-    Raises:
-        ValueError: If GOOGLE_API_KEY is not set
-    """
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "GOOGLE_API_KEY not found in environment variables. "
-            "Please add it to your .env file."
-        )
-
-    # Initialize Gemini with temperature for creative recipe adaptation
-    llm = ChatGoogleGenerativeAI(
-        model=GEMINI_MODEL,
-        temperature=GEMINI_TEMPERATURE,
-        google_api_key=api_key
-    )
-
-    return llm
-
 
 def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restrictions,
                          num_results=NUM_RESULTS, use_reranking=False):
@@ -147,35 +88,6 @@ def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restr
         num_results=num_results,
         use_reranking=use_reranking
     )
-
-
-def generate_recipe(llm, context, ingredients, restrictions):
-    """
-    Generate a recipe recommendation using the LLM.
-
-    Args:
-        llm: Language model instance
-        context (str): Recipe context from vector search
-        ingredients (str): User's ingredients
-        restrictions (str): Dietary restrictions
-
-    Returns:
-        str: Generated recipe recommendation
-    """
-    # Create prompt from template
-    prompt = ChatPromptTemplate.from_template(RECIPE_PROMPT_TEMPLATE)
-
-    # Format the prompt with user inputs
-    formatted_prompt = prompt.format(
-        context=context,
-        ingredients=ingredients,
-        restrictions=restrictions if restrictions else "None"
-    )
-
-    # Generate response
-    response = llm.invoke(formatted_prompt)
-
-    return response.content
 
 
 # ============================================================================
@@ -257,18 +169,13 @@ def main():
             )
 
 
-    # Initialize components
+    # Initialize components (cached — only runs once, not on every re-render)
     try:
-        with st.spinner("Loading vector database..."):
-            vectorstore = initialize_vectorstore()
-
-        with st.spinner("Initializing hybrid search (BM25 + Semantic + RRF)..."):
-            bm25_retriever, semantic_retriever = initialize_hybrid_retriever(vectorstore)
+        bm25_retriever, semantic_retriever = get_search_components()
 
         # Only initialize LLM if not in debug mode
         if not debug_mode:
-            with st.spinner("Initializing AI model..."):
-                llm = initialize_llm()
+            llm = get_llm()
         else:
             llm = None  # Not needed in debug mode
 

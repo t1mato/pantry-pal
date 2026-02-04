@@ -70,3 +70,10 @@ from core.retrieval import (
     search_hybrid,
     format_context,
 )
+
+# LLM functions (shared by app.py and evaluation.py)
+from core.llm import (
+    initialize_llm,
+    generate_recipe,
+    RECIPE_PROMPT_TEMPLATE,
+)

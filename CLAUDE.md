@@ -9,10 +9,21 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 ## Architecture
 
 ### Three-Phase System
-1. **Ingestion** (`ingest.py`): PDF → text chunks → local embeddings → ChromaDB
-2. **Hybrid Retrieval** (`app.py`): BM25 + Semantic → RRF fusion → cross-encoder reranking (optional)
+1. **Ingestion** (`ingest.py`): PDF → text chunks → local embeddings → ChromaDB (batch support with deduplication)
+2. **Hybrid Retrieval** (`core/retrieval.py`): BM25 + Semantic → RRF fusion → cross-encoder reranking (optional)
 3. **Generation** (`app.py`): Context → Gemini → formatted recipe
 4. **Evaluation** (`evaluation.py`): RAGAS metrics via Groq API
+
+### Module Structure
+- **`core/`** — Shared utilities module (config, retrieval algorithms, embeddings)
+  - `config.py`: All configuration constants (single source of truth)
+  - `retrieval.py`: RRF fusion, cross-encoder reranking, hybrid search, format_context
+  - `embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
+  - `__init__.py`: Clean public API for imports
+- **`app.py`** — Streamlit UI + LLM-specific functions (initialize_llm, generate_recipe)
+- **`ingest.py`** — PDF processing, batch ingestion, deduplication
+- **`evaluation.py`** — RAGAS evaluation (imports from `core` + 2 LLM functions from `app`)
+- **`tests/`** — pytest suite with fixtures and unit tests
 
 ### Key Components
 
@@ -25,7 +36,7 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 - **Critical:** Uses local HuggingFace embeddings, NOT Google Embedding API
 - Reason: Google's free tier has strict rate limits (hit 429 errors immediately)
 - Model: `all-MiniLM-L6-v2` - fast, lightweight (~120MB), sufficient for recipe matching
-- Both `ingest.py` and `app.py` MUST use identical embedding model
+- Embedding creation centralized in `core/embeddings.py::create_embeddings()` — ensures consistency
 
 **LLM Integration**
 - Google Gemini 2.5 Flash via `langchain-google-genai`
@@ -38,13 +49,13 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 - `RecursiveCharacterTextSplitter` with recipe-specific separators: `["\n\n", "Title:", "Ingredients:"]`
 - Preserves recipe structure (title, ingredients, instructions)
 
-**Hybrid Search (app.py)**
+**Hybrid Search (core/retrieval.py)**
 - **BM25 Retriever**: Keyword-based search using `rank-bm25` library
 - **Semantic Retriever**: ChromaDB vector similarity search
 - **RRF Fusion**: Reciprocal Rank Fusion combines both result sets
-- Equal weighting (50/50) between BM25 and semantic
+- Weighting: 40% BM25, 60% semantic (configurable in `core/config.py`)
 
-**Cross-Encoder Reranking (app.py)**
+**Cross-Encoder Reranking (core/retrieval.py)**
 - Model: `cross-encoder/ms-marco-MiniLM-L-6-v2`
 - Retrieves top 10 candidates from RRF fusion
 - Reranks with cross-encoder scores
@@ -77,7 +88,15 @@ python ingest.py
 
 # Process specific PDF
 python ingest.py data/cookbook.pdf
+
+# Batch mode: process all PDFs in a directory
+python ingest.py data/
 ```
+
+**Features:**
+- Batch ingestion: pass a directory to process all PDFs
+- Duplicate detection: skips already-ingested files (checks ChromaDB metadata)
+- Appends to existing database (doesn't overwrite)
 
 **Output:** Creates/updates `./chroma_db/` with embedded recipe chunks
 
@@ -111,22 +130,20 @@ python ingest.py
 
 ### Critical Settings
 
-**ingest.py:**
-- `EMBEDDING_MODEL = "all-MiniLM-L6-v2"` - must match app.py
-- `CHUNK_SIZE = 2000`
-- `CHUNK_OVERLAP = 200`
-- `CHUNK_SEPARATORS = ["\n\n", "Title:", "Ingredients:"]`
+**All configuration is centralized in `core/config.py`** — no more duplicate constants across files.
 
-**app.py:**
-- `EMBEDDING_MODEL = "all-MiniLM-L6-v2"` - must match ingest.py
+**core/config.py** (single source of truth):
+- `EMBEDDING_MODEL = "all-MiniLM-L6-v2"` - shared across all modules
+- `CHUNK_SIZE = 2000` / `CHUNK_OVERLAP = 200`
+- `CHUNK_SEPARATORS = ["\n\n", "Title:", "Ingredients:"]`
 - `GEMINI_MODEL = "gemini-flash-latest"`
 - `NUM_RESULTS = 5` - final number of results returned
 - `RERANK_TOP_K = 10` - candidates for cross-encoder reranking
 - `CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"`
+- `GROQ_MODEL = "llama-3.1-8b-instant"` - for RAGAS evaluation
 
-**evaluation.py:**
+**evaluation.py** (evaluation-specific):
 - `TEST_CASES = 3` - recipe queries for evaluation
-- `GROQ_MODEL = "llama-3.1-8b-instant"` - fast, free tier
 - `AnswerRelevancy(strictness=1)` - CRITICAL: Groq only supports n=1
 - Use `ragas.metrics` (legacy), NOT `ragas.metrics.collections`
 
@@ -137,15 +154,12 @@ python ingest.py
 ## Important Implementation Details
 
 ### Embedding Model Consistency
-**Critical:** Both scripts must use identical embedding model. Mismatched embeddings result in nonsensical similarity scores.
+**Critical:** All modules must use identical embedding configuration. This is now enforced by centralizing embedding creation in `core/embeddings.py::create_embeddings()`.
 
 ```python
-# Both ingest.py and app.py use:
-HuggingFaceEmbeddings(
-    model_name="all-MiniLM-L6-v2",
-    model_kwargs={"device": "cpu"},
-    encode_kwargs={"normalize_embeddings": True}
-)
+# All modules use:
+from core import create_embeddings
+embeddings = create_embeddings()  # Guarantees consistent config
 ```
 
 ### Chunk Configuration
@@ -211,10 +225,14 @@ HuggingFaceEmbeddings(
 - Latest model (2.5 Flash) is fast and capable
 
 ### Code Organization
-- Configuration constants at top of files
+- Configuration centralized in `core/config.py` (single source of truth)
+- Shared retrieval algorithms in `core/retrieval.py`
+- Shared embedding setup in `core/embeddings.py`
+- `app.py` contains only UI logic and LLM-specific functions
+- `ingest.py` contains only PDF processing and batch ingestion logic
+- `evaluation.py` imports from `core` (decoupled from `app.py`)
 - Helper functions with comprehensive docstrings
 - Main execution in `main()` function
-- Extensive inline comments for complex logic
 
 ## Dependencies
 
@@ -237,9 +255,16 @@ HuggingFaceEmbeddings(
 
 ## File Purposes
 
-- `app.py`: Streamlit UI, hybrid search (BM25 + Semantic + RRF), cross-encoder reranking, Gemini integration
-- `ingest.py`: PDF validation, text extraction, chunking, embedding generation, ChromaDB storage
-- `evaluation.py`: RAGAS evaluation framework, tests 4 retrieval methods with 4 metrics
+- `core/config.py`: Centralized configuration constants (single source of truth)
+- `core/retrieval.py`: RRF fusion, cross-encoder reranking, hybrid search, format_context
+- `core/embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
+- `core/__init__.py`: Package exports for clean imports
+- `app.py`: Streamlit UI, LLM initialization, recipe generation (imports from `core`)
+- `ingest.py`: PDF processing, batch ingestion, deduplication (imports from `core`)
+- `evaluation.py`: RAGAS evaluation framework, tests 4 retrieval methods (imports from `core` + `app`)
+- `tests/conftest.py`: Shared pytest fixtures (mock recipe data)
+- `tests/test_retrieval.py`: Unit tests for RRF and format_context (11 tests)
+- `pytest.ini`: Test configuration
 - `requirements.txt`: Pinned dependencies
 - `EVALUATION_RESULTS.md`: RAGAS evaluation findings and recommendations
 - `.env`: API credentials (GOOGLE_API_KEY, GROQ_API_KEY - create manually, gitignored)
@@ -248,10 +273,33 @@ HuggingFaceEmbeddings(
 
 ## Testing
 
+### Unit Tests (pytest)
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test class
+python -m pytest tests/test_retrieval.py::TestReciprocalRankFusion -v
+
+# Run single test
+python -m pytest tests/test_retrieval.py::TestFormatContext::test_handles_missing_metadata -v
+```
+
+**Test coverage:** 11 tests covering:
+- `reciprocal_rank_fusion()`: combining results, deduplication, k parameter, edge cases
+- `format_context()`: metadata inclusion, content formatting, missing metadata handling
+
+**Test structure:**
+- `tests/conftest.py`: Shared fixtures (mock Document objects, simulated retriever results)
+- `tests/test_retrieval.py`: Unit tests for core retrieval functions
+
+### Manual Verification
+
 **Verify installation:**
 ```python
 python -c "from langchain_huggingface import HuggingFaceEmbeddings; print('OK')"
 python -c "from langchain_google_genai import ChatGoogleGenerativeAI; print('OK')"
+python -c "from core import create_embeddings; print('OK')"
 ```
 
 **Test ingestion:**
@@ -262,19 +310,16 @@ python ingest.py
 
 **Test embeddings:**
 ```python
-from langchain_huggingface import HuggingFaceEmbeddings
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+from core import create_embeddings
+embeddings = create_embeddings()
 test = embeddings.embed_query("test")
 print(f"Embedding dimension: {len(test)}")  # Should be 384
 ```
 
 **Test vector store:**
 ```python
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-
-embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+from core import initialize_vectorstore
+vectorstore = initialize_vectorstore()
 results = vectorstore.similarity_search("chicken recipe", k=2)
 print(f"Found {len(results)} results")
 ```
@@ -312,8 +357,12 @@ See `EVALUATION_RESULTS.md` for detailed analysis.
 
 ## Future Considerations
 
-- Batch PDF ingestion (currently one at a time)
-- GPU acceleration for embeddings (change `device: "cpu"` to `"cuda"`)
-- Multiple cookbook support in single ingestion run
-- Recipe deduplication across cookbooks
+- ~~Batch PDF ingestion~~ ✅ Implemented (folder support + deduplication)
+- ~~Modular architecture~~ ✅ Implemented (`core/` module)
+- ~~Unit tests~~ ✅ Implemented (pytest with 11 tests)
+- GPU acceleration for embeddings (change `device: "cpu"` to `"cuda"` in `core/embeddings.py`)
+- Recipe deduplication across cookbooks (content-level, not just file-level)
 - Caching frequently requested recipes
+- FastAPI backend for API access
+- Expand RAGAS test cases from 3 → 20+
+- Integration tests for full pipeline
