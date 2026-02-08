@@ -78,6 +78,7 @@ from core import (
     # LLM (shared with evaluation.py via core/)
     initialize_llm,
     generate_recipe,
+    expand_query,
 )
 
 # ============================================================================
@@ -103,13 +104,14 @@ def get_llm():
 # ============================================================================
 
 def search_recipes_hybrid(bm25_retriever, semantic_retriever, user_query, restrictions,
-                         num_results=NUM_RESULTS, use_reranking=False):
+                         num_results=NUM_RESULTS, use_reranking=False, llm=None):
     """
-    Search for recipes using hybrid retrieval.
+    Search for recipes using hybrid retrieval with optional query expansion.
 
     This is a thin wrapper around core.search_hybrid that:
-    1. Combines user query with dietary restrictions (if any)
-    2. Delegates to the core search function
+    1. Expands the query using LLM (if provided) for better vocabulary matching
+    2. Combines user query with dietary restrictions (if any)
+    3. Delegates to the core search function
 
     Args:
         bm25_retriever: BM25 keyword retriever
@@ -118,12 +120,18 @@ def search_recipes_hybrid(bm25_retriever, semantic_retriever, user_query, restri
         restrictions (str): Dietary restrictions
         num_results (int): Number of results to retrieve
         use_reranking (bool): Whether to apply cross-encoder reranking
+        llm: Optional LLM instance for query expansion
 
     Returns:
         list: List of Document objects with recipe chunks and metadata
     """
-    # Use user's natural language query directly
-    query = user_query
+    # Expand query if LLM is provided (adds synonyms and related terms)
+    if llm is not None:
+        query = expand_query(llm, user_query)
+    else:
+        query = user_query
+
+    # Add dietary restrictions to query
     if restrictions:
         query += f" (dietary restrictions: {restrictions})"
 
@@ -235,7 +243,8 @@ def main():
             user_query,
             restrictions,
             num_results=num_results,
-            use_reranking=use_reranking
+            use_reranking=use_reranking,
+            llm=llm  # Enable query expansion
         )
 
         skeleton_placeholder.empty()

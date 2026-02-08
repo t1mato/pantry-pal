@@ -4,14 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbooks. Features **hybrid search** (BM25 + Semantic), **cross-encoder reranking**, and **RAGAS evaluation framework**.
+**PantryPal** is a chatbot-style recipe finder powered by RAG (Retrieval-Augmented Generation). Users describe what they want to cook naturally, and the app searches PDF cookbooks using hybrid search (BM25 + Semantic) with cross-encoder reranking to find and adapt recipes.
+
+### UI Design
+- **Branding:** "PantryPal" with tagline "Make the most of your pantry with a click of a button"
+- **Typography:** Space Grotesk font (Google Fonts)
+- **Color scheme:** Soft Sage theme (`#5a7d5a` primary, `#f8faf8` background)
+- **Layout:** Centered, minimal, professional
+- **Theme config:** `.streamlit/config.toml`
 
 ## Architecture
 
-### Three-Phase Pipeline
+### Four-Phase Pipeline
 1. **Ingestion** (`ingest.py`): PDF → text chunks → local embeddings → ChromaDB (batch support with deduplication)
-2. **Hybrid Retrieval** (`core/retrieval.py`): BM25 + Semantic → RRF fusion → cross-encoder reranking (optional)
-3. **Generation** (`core/llm.py`): Context → Gemini → formatted recipe (served via `app.py` Streamlit UI)
+2. **Query Expansion** (`core/llm.py`): User query → LLM extracts keywords + adds synonyms → enriched query
+3. **Hybrid Retrieval** (`core/retrieval.py`): BM25 + Semantic → RRF fusion → cross-encoder reranking
+4. **Generation** (`core/llm.py`): Context → Gemini → formatted recipe (served via `app.py` Streamlit UI)
 
 ### Evaluation (offline)
 - **`evaluation.py`**: RAGAS metrics via Groq API — runs independently from the user-facing pipeline
@@ -21,9 +29,10 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
   - `config.py`: All configuration constants (single source of truth)
   - `retrieval.py`: RRF fusion, cross-encoder reranking (cached), hybrid search, format_context
   - `embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
-  - `llm.py`: LLM initialization, recipe generation, prompt template (shared by app + evaluation)
+  - `llm.py`: LLM initialization, query expansion, recipe generation, prompt templates (shared by app + evaluation)
   - `__init__.py`: Clean public API for imports
-- **`app.py`** — Streamlit UI only (imports LLM functions from `core`, uses `@st.cache_resource`)
+- **`app.py`** — PantryPal Streamlit UI (Space Grotesk font, Soft Sage theme, centered layout)
+- **`.streamlit/config.toml`** — Theme configuration (colors, font)
 - **`ingest.py`** — PDF processing, batch ingestion, deduplication
 - **`evaluation.py`** — RAGAS evaluation (imports everything from `core`, no dependency on `app`)
 - **`tests/`** — pytest suite with fixtures and unit tests
@@ -44,8 +53,11 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 **LLM Integration**
 - Google Gemini 2.5 Flash via `langchain-google-genai`
 - Model: `gemini-flash-latest` (automatically uses newest available)
-- Used only for recipe generation, NOT embeddings
+- Used for query expansion AND recipe generation, NOT embeddings
 - API key: `GOOGLE_API_KEY` in `.env`
+- **Query expansion:** Extracts ingredients, adds synonyms (chicken→poultry), adds cooking methods (stir-fry, curry)
+- **Response format:** Clean markdown with ## headers, ingredients list, numbered instructions, and Chef's Notes with "See also" alternatives
+- **Important:** Handles both old (string) and new (list of content blocks) Gemini response formats
 
 **Document Processing**
 - PDFs loaded via `PyPDFLoader` from `data/` directory
@@ -194,9 +206,10 @@ See `requirements.txt` for the full list. Critical version pins:
 - `core/config.py`: Centralized configuration constants (single source of truth)
 - `core/retrieval.py`: RRF fusion, cross-encoder reranking (model cached), hybrid search, format_context
 - `core/embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
-- `core/llm.py`: LLM initialization, recipe generation, prompt template (shared by app + evaluation)
+- `core/llm.py`: LLM initialization, query expansion, recipe generation, prompt templates
 - `core/__init__.py`: Package exports for clean imports
-- `app.py`: Streamlit UI only, uses `@st.cache_resource` for cached initialization (imports from `core`)
+- `.streamlit/config.toml`: Soft Sage theme configuration (colors, font)
+- `app.py`: PantryPal Streamlit UI with Space Grotesk font, centered layout, Soft Sage theme
 - `ingest.py`: PDF processing, batch ingestion, deduplication (imports from `core`)
 - `evaluation.py`: RAGAS evaluation framework, tests 4 retrieval methods (imports from `core` only)
 - `tests/conftest.py`: Shared pytest fixtures (mock recipe data)
@@ -236,12 +249,13 @@ See `README.md` for full performance tables and cost breakdown. See `EVALUATION_
 
 - ~~Batch PDF ingestion~~ ✅ Implemented (folder support + deduplication)
 - ~~Modular architecture~~ ✅ Implemented (`core/` module)
-- ~~Unit tests~~ ✅ Implemented (pytest with 11 tests)
+- ~~Unit tests~~ ✅ Implemented (pytest with 26 tests)
 - ~~Decouple evaluation from app~~ ✅ Implemented (LLM functions moved to `core/llm.py`)
 - ~~Performance caching~~ ✅ Implemented (`@st.cache_resource` + cross-encoder model cache)
+- ~~FastAPI backend~~ ✅ Implemented (`api.py` with /health, /search, /generate endpoints)
+- ~~Expand RAGAS test cases~~ ✅ Implemented (15 test cases across 5 categories)
+- ~~UI redesign~~ ✅ Implemented (PantryPal branding, Space Grotesk, Soft Sage theme)
 - GPU acceleration for embeddings (change `device: "cpu"` to `"cuda"` in `core/embeddings.py`)
 - Recipe deduplication across cookbooks (content-level, not just file-level)
 - Caching frequently requested recipes
-- FastAPI backend for API access
-- Expand RAGAS test cases from 3 → 20+
 - Integration tests for full pipeline

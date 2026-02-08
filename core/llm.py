@@ -17,7 +17,71 @@ from core.config import GEMINI_MODEL, GEMINI_TEMPERATURE
 
 load_dotenv()
 
-# Prompt template for recipe generation
+# ============================================================================
+# QUERY EXPANSION
+# ============================================================================
+
+QUERY_EXPANSION_TEMPLATE = """
+Extract and expand the cooking-related keywords from this query.
+
+QUERY: {query}
+
+RULES:
+1. Extract main ingredients mentioned
+2. Add 1-2 synonyms for each ingredient (chicken→poultry, eggplant→aubergine)
+3. Add 2-3 likely cooking methods or dish types
+4. Output ONLY space-separated keywords, no sentences
+5. Maximum 25 words
+
+EXAMPLE:
+Query: "I have chicken and rice, maybe some vegetables"
+Output: chicken poultry rice grain vegetables veggies stir-fry fried-rice casserole curry
+
+OUTPUT:"""
+
+
+def expand_query(llm, query):
+    """
+    Expand a user's natural language query into search keywords.
+
+    Uses the LLM to:
+    - Extract key ingredients
+    - Add synonyms (chicken → poultry)
+    - Add related cooking methods (chicken + rice → stir-fry, curry)
+
+    This improves retrieval by matching more vocabulary in the cookbook.
+
+    Args:
+        llm: Language model instance
+        query (str): User's natural language query
+
+    Returns:
+        str: Expanded query with additional keywords
+    """
+    prompt = ChatPromptTemplate.from_template(QUERY_EXPANSION_TEMPLATE)
+    formatted_prompt = prompt.format(query=query)
+
+    response = llm.invoke(formatted_prompt)
+
+    # Handle both response formats (same as generate_recipe)
+    content = response.content
+    if isinstance(content, list):
+        expanded = content[0].get("text", "") if content else ""
+    else:
+        expanded = content
+
+    # Clean up: remove extra whitespace, keep it concise
+    expanded = " ".join(expanded.strip().split())
+
+    # Combine original query with expanded keywords for best results
+    # Original query preserves user intent, expanded adds vocabulary
+    return f"{query} {expanded}"
+
+
+# ============================================================================
+# RECIPE GENERATION
+# ============================================================================
+
 RECIPE_PROMPT_TEMPLATE = """
 You are a helpful cooking assistant. Based on the recipe context provided below,
 create a recipe recommendation that uses the user's available ingredients and

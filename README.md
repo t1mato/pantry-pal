@@ -1,34 +1,39 @@
-# Smart Pantry & Diet Guardian
+# PantryPal
 
 [![Tests](https://github.com/t1mato/smart-pantry/actions/workflows/test.yml/badge.svg)](https://github.com/t1mato/smart-pantry/actions/workflows/test.yml)
 
-Advanced RAG-based recipe search with **hybrid retrieval** (BM25 + Semantic) and **cross-encoder reranking** for optimal recipe discovery from PDF cookbooks.
+**Make the most of your pantry with a click of a button.**
+
+A chatbot-style recipe finder powered by hybrid search (BM25 + Semantic) with cross-encoder reranking. Ask naturally about what you want to cook!
 
 <!-- TODO: Replace with actual screenshot of the Streamlit UI -->
 <!-- Run the app, search for a recipe, and capture a screenshot: -->
 <!-- Save it as assets/screenshot.png, then uncomment the line below -->
-<!-- ![Smart Pantry UI](assets/screenshot.png) -->
+<!-- ![PantryPal UI](assets/screenshot.png) -->
 
 ## Overview
 
 Three-phase RAG system with rigorous RAGAS evaluation:
 
 1. **Ingestion:** PDFs → text extraction → chunking → local embeddings → ChromaDB
-2. **Hybrid Retrieval:** BM25 (keyword) + Semantic (embeddings) → RRF fusion → cross-encoder reranking
-3. **Generation:** Context → Gemini LLM → formatted recipe with dietary adaptation
+2. **Query Expansion:** User query → LLM adds synonyms/keywords → enriched search query
+3. **Hybrid Retrieval:** BM25 (keyword) + Semantic (embeddings) → RRF fusion → cross-encoder reranking
+4. **Generation:** Context → Gemini LLM → formatted recipe with dietary adaptation
 
 ### Architecture
 
+- **Query Expansion:** LLM-based keyword extraction and synonym generation
 - **Embeddings:** HuggingFace `all-MiniLM-L6-v2` (local, 384-dim)
 - **Hybrid Search:** BM25 + Semantic with Reciprocal Rank Fusion (RRF)
-- **Reranking:** Cross-encoder `ms-marco-MiniLM-L-6-v2` (optional, +6.1% answer quality)
+- **Reranking:** Cross-encoder `ms-marco-MiniLM-L-6-v2` (+6.1% answer quality)
 - **Vector Store:** ChromaDB (local SQLite persistence)
 - **LLM:** Google Gemini 2.5 Flash
 - **Evaluation:** RAGAS framework (Groq llama-3.1-8b for metrics)
-- **Frontend:** Streamlit
+- **Frontend:** Streamlit with Space Grotesk font and Soft Sage theme
 
 ### Key Features
 
+- **Query Expansion:** LLM expands user queries with synonyms and related terms for better matching
 - **Hybrid Search:** Combines keyword matching (BM25) with semantic understanding
 - **Cross-Encoder Reranking:** Improves answer relevancy from 53.4% → 59.5%
 - **Batch Ingestion:** Process entire folders of PDFs with duplicate detection
@@ -74,15 +79,19 @@ uvicorn api:app --reload
 
 ## Usage
 
-### Streamlit App
+### Streamlit App (PantryPal)
 
 1. Navigate to http://localhost:8501
-2. Enter ingredients (e.g., "chicken, rice, bell peppers")
+2. Describe what you want to cook naturally (e.g., "I have chicken, rice, and some vegetables")
 3. Optionally specify dietary restrictions (e.g., "gluten-free, vegetarian")
-4. Toggle "Enable Cross-Encoder Reranking" (recommended: ON)
-5. Toggle "Debug Mode" to view retrieval results without LLM generation
-6. Submit query
-7. Receive adapted recipe with source citation
+4. Click "Find recipes"
+5. Receive a formatted recipe with:
+   - Ingredients list with measurements
+   - Step-by-step instructions
+   - Chef's notes with substitutions and "See also" alternatives
+   - Source citations from the cookbook
+
+**Debug mode:** Add `?debug=true` to URL to view raw retrieval results without LLM generation.
 
 ### REST API
 
@@ -136,7 +145,8 @@ smart-pantry/
 │   ├── test_retrieval.py       # Tests for RRF and format_context
 │   ├── test_ingest.py          # Tests for PDF discovery and document splitting
 │   └── test_search.py          # Tests for hybrid search pipeline (mocked)
-├── app.py                      # Streamlit UI (cached initialization via @st.cache_resource)
+├── .streamlit/config.toml      # Soft Sage theme configuration
+├── app.py                      # PantryPal Streamlit UI (Space Grotesk font, centered layout)
 ├── ingest.py                   # PDF processing + batch ingestion + deduplication
 ├── evaluation.py               # RAGAS evaluation framework (imports from core only)
 ├── requirements.txt            # Python dependencies

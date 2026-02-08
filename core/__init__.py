@@ -75,5 +75,6 @@ from core.retrieval import (
 from core.llm import (
     initialize_llm,
     generate_recipe,
+    expand_query,
     RECIPE_PROMPT_TEMPLATE,
 )
