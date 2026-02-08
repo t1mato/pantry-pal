@@ -13,18 +13,26 @@ Compares:
 - Semantic Search only
 - BM25 Search only
 - Hybrid (BM25 + Semantic + RRF)
-- Hybrid + Cross-Encoder Reranking (future)
+- Hybrid + Cross-Encoder Reranking
+
+Usage:
+    python evaluation.py [--verbose | --quiet]
 """
 
+import argparse
+import logging
 import os
 import sys
-from typing import List
+from typing import List, Dict
 from dataclasses import dataclass
 import pandas as pd
 from datetime import datetime
 
 from langchain_groq import ChatGroq
 from langchain_core.documents import Document
+from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
+from langchain_huggingface import HuggingFaceEmbeddings
 from dotenv import load_dotenv
 
 # RAGAS imports
@@ -46,6 +54,7 @@ from core import (
     # Config
     CHROMA_PATH,
     GEMINI_MODEL,
+    EMBEDDING_MODEL,
 
     # Embeddings & vectorstore
     initialize_vectorstore,
@@ -61,6 +70,9 @@ from core import (
     generate_recipe,
 )
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # TEST DATASET
@@ -74,24 +86,95 @@ class TestCase:
     relevant_keywords: List[str]  # Keywords that should appear in results
 
 
-# Reduced test cases to stay within API limits
-# Gemini free tier: 20 requests/day
-# We need: 4 test cases × 3 methods × 2 (generation + RAGAS) = ~24 calls
+# Expanded test cases for statistically meaningful evaluation
+# 15 test cases × 4 methods = 60 evaluations
+# Covers: ingredients, dietary restrictions, budget, cuisine, meal types
+#
+# Ground truths are based on actual "Good and Cheap" cookbook content
 TEST_CASES = [
+    # === SPECIFIC INGREDIENT QUERIES ===
     TestCase(
         question="I have chicken and rice. What can I make for dinner?",
-        ground_truth="A recipe using chicken and rice as main ingredients, such as chicken and rice casserole, fried rice with chicken, or chicken rice bowl.",
-        relevant_keywords=["chicken", "rice"]
+        ground_truth="Filipino Chicken Adobo is a savory chicken dish that pairs well with rice. The cookbook features this as a main dinner recipe.",
+        relevant_keywords=["chicken", "adobo", "rice"]
     ),
+    TestCase(
+        question="What can I make with eggs for breakfast?",
+        ground_truth="Tomato Scrambled Eggs, omelettes, or egg sandwiches. The cookbook emphasizes eggs as a versatile, budget-friendly protein.",
+        relevant_keywords=["eggs", "scrambled", "omelette", "breakfast"]
+    ),
+    TestCase(
+        question="I have zucchini that's about to go bad. Any recipes?",
+        ground_truth="Creamy Zucchini Fettuccine for dinner or Chocolate Zucchini Muffins for a sweet treat. Both use fresh zucchini.",
+        relevant_keywords=["zucchini", "fettuccine", "muffins"]
+    ),
+    TestCase(
+        question="What recipes use eggplant?",
+        ground_truth="Pasta with Eggplant and Tomato is a vegetarian dinner option featuring roasted or sautéed eggplant with pasta.",
+        relevant_keywords=["eggplant", "pasta", "tomato"]
+    ),
+
+    # === DIETARY RESTRICTION QUERIES ===
     TestCase(
         question="What vegetarian recipes use beans for protein?",
-        ground_truth="Vegetarian recipes featuring beans as a protein source, such as bean chili, bean burgers, or bean salad.",
-        relevant_keywords=["bean", "vegetarian", "protein"]
+        ground_truth="Black-Eyed Peas and Collards, Baked Beans, or Chana Masala (chickpeas). These are hearty vegetarian mains.",
+        relevant_keywords=["beans", "vegetarian", "protein", "chana", "black-eyed"]
     ),
     TestCase(
+        question="What vegan-friendly dinner options are there?",
+        ground_truth="Vegetable Jambalaya, Chana Masala, and Pasta with Eggplant and Tomato can all be made vegan.",
+        relevant_keywords=["vegan", "vegetable", "jambalaya", "chana"]
+    ),
+    TestCase(
+        question="I need a meatless Monday dinner idea.",
+        ground_truth="Creamy Zucchini Fettuccine, Black-Eyed Peas and Collards, or Half-Veggie Burgers are satisfying meatless options.",
+        relevant_keywords=["meatless", "vegetarian", "veggie", "burgers"]
+    ),
+
+    # === BUDGET/FRUGAL QUERIES ===
+    TestCase(
         question="I'm on a tight budget and have pasta. What's a cheap meal?",
-        ground_truth="Budget-friendly pasta dishes like pasta with simple tomato sauce, aglio e olio, or pasta with vegetables.",
-        relevant_keywords=["pasta", "budget", "cheap"]
+        ground_truth="Pasta with Eggplant and Tomato or Creamy Zucchini Fettuccine. The cookbook is designed for $4/day budgets.",
+        relevant_keywords=["pasta", "budget", "cheap", "eggplant", "zucchini"]
+    ),
+    TestCase(
+        question="What's the cheapest filling meal I can make?",
+        ground_truth="Oatmeal for breakfast, bean-based dishes like Baked Beans or Black-Eyed Peas for dinner. Eggs are also very economical.",
+        relevant_keywords=["cheap", "budget", "oatmeal", "beans", "eggs"]
+    ),
+    TestCase(
+        question="How can I eat well on food stamps?",
+        ground_truth="The Good and Cheap cookbook is specifically designed for SNAP recipients living on $4/day. Focus on eggs, beans, and seasonal vegetables.",
+        relevant_keywords=["budget", "food stamps", "SNAP", "cheap"]
+    ),
+
+    # === CUISINE-TYPE QUERIES ===
+    TestCase(
+        question="Do you have any Indian-inspired recipes?",
+        ground_truth="Chana Masala is an Indian chickpea curry. The cookbook also mentions raita and roti as accompaniments.",
+        relevant_keywords=["indian", "chana", "masala", "curry", "roti"]
+    ),
+    TestCase(
+        question="What Asian recipes are in the cookbook?",
+        ground_truth="Filipino Chicken Adobo is a tangy, savory Filipino dish. The cookbook includes various Asian-influenced recipes.",
+        relevant_keywords=["asian", "filipino", "adobo", "chicken"]
+    ),
+
+    # === MEAL-TYPE QUERIES ===
+    TestCase(
+        question="What quick breakfast can I make in 10 minutes?",
+        ground_truth="Tomato Scrambled Eggs or a simple omelette. Both can be made quickly with basic pantry ingredients.",
+        relevant_keywords=["breakfast", "quick", "eggs", "scrambled", "omelette"]
+    ),
+    TestCase(
+        question="I need healthy snack ideas for kids.",
+        ground_truth="Peanut Butter and Jelly Granola Bars or Chocolate Zucchini Muffins are kid-friendly, portable snacks.",
+        relevant_keywords=["snack", "granola", "bars", "muffins", "kids"]
+    ),
+    TestCase(
+        question="What's a good comfort food for a cold day?",
+        ground_truth="French Onion Soup is a warm, comforting classic. Oatmeal also makes a cozy, warming meal.",
+        relevant_keywords=["comfort", "soup", "onion", "warm", "oatmeal"]
     ),
 ]
 
@@ -147,7 +230,7 @@ def create_ragas_dataset(test_cases: List[TestCase], retrieval_method, llm, meth
     - contexts: Retrieved documents (list of strings)
     - ground_truth: Expected answer (for context_recall)
     """
-    print(f"\n🔍 Generating dataset for: {method_name}")
+    logger.info(f"🔍 Generating dataset for: {method_name}")
 
     questions = []
     answers = []
@@ -155,7 +238,7 @@ def create_ragas_dataset(test_cases: List[TestCase], retrieval_method, llm, meth
     ground_truths = []
 
     for i, test_case in enumerate(test_cases, 1):
-        print(f"   [{i}/{len(test_cases)}] Processing: \"{test_case.question[:50]}...\"")
+        logger.info(f"   [{i}/{len(test_cases)}] Processing: \"{test_case.question[:50]}...\"")
 
         # Retrieve documents
         retrieved_docs = retrieval_method(test_case.question)
@@ -206,15 +289,15 @@ def evaluate_retrieval_method(
 
     Returns dict of metric scores.
     """
-    print(f"\n{'='*80}")
-    print(f"📊 Evaluating: {method_name}")
-    print(f"{'='*80}")
+    logger.info("=" * 80)
+    logger.info(f"📊 Evaluating: {method_name}")
+    logger.info("=" * 80)
 
     # Create dataset
     dataset = create_ragas_dataset(test_cases, retrieval_func, llm, method_name)
 
-    print(f"\n🧪 Running RAGAS evaluation...")
-    print(f"   This may take a few minutes (using LLM for metrics)...")
+    logger.info("🧪 Running RAGAS evaluation...")
+    logger.info("   This may take a few minutes (using LLM for metrics)...")
 
     # Configure RAGAS with extended timeouts and better error handling
     run_config = RunConfig(
@@ -247,16 +330,16 @@ def evaluate_retrieval_method(
         raise_exceptions=False  # Continue even if some metrics fail
     )
 
-    print(f"\n✅ Evaluation complete for {method_name}")
+    logger.info(f"✅ Evaluation complete for {method_name}")
 
     return results
 
 
 def compare_methods(all_results):
     """Print comparison table of all methods."""
-    print("\n" + "="*100)
-    print("📊 RAGAS EVALUATION RESULTS - COMPARISON")
-    print("="*100)
+    logger.info("=" * 100)
+    logger.info("📊 RAGAS EVALUATION RESULTS - COMPARISON")
+    logger.info("=" * 100)
 
     # Extract metrics
     metrics = ["context_precision", "context_recall", "faithfulness", "answer_relevancy"]
@@ -268,28 +351,29 @@ def compare_methods(all_results):
         df = eval_result.to_pandas()
         results_dict[method_name] = {metric: df[metric].mean() for metric in metrics}
 
-    # Create comparison table
-    print(f"\n{'Method':<25}", end="")
+    # Create comparison table header
+    header = f"{'Method':<25}"
     for metric in metrics:
-        print(f"{metric:<20}", end="")
-    print()
-    print("-" * 100)
+        header += f"{metric:<20}"
+    logger.info(header)
+    logger.info("-" * 100)
 
+    # Log each method's results
     for method_name, scores in results_dict.items():
-        print(f"{method_name:<25}", end="")
+        row = f"{method_name:<25}"
         for metric in metrics:
             value = scores.get(metric, 0.0)
-            print(f"{value:.4f}{' '*15}", end="")
-        print()
+            row += f"{value:.4f}{' '*15}"
+        logger.info(row)
 
-    print("\n" + "="*100)
+    logger.info("=" * 100)
 
     # Calculate and display best performer for each metric
-    print("\n🏆 Best Performers:")
+    logger.info("🏆 Best Performers:")
     for metric in metrics:
         best_method = max(results_dict.items(), key=lambda x: x[1].get(metric, 0))
         best_value = best_method[1].get(metric, 0)
-        print(f"   {metric}: {best_method[0]} ({best_value:.4f})")
+        logger.info(f"   {metric}: {best_method[0]} ({best_value:.4f})")
 
 
 def save_results_to_csv(all_results, filename: str = "evaluation_results.csv"):
@@ -308,7 +392,7 @@ def save_results_to_csv(all_results, filename: str = "evaluation_results.csv"):
 
     # Save to CSV
     df.to_csv(filename)
-    print(f"\n💾 Results saved to: {filename}")
+    logger.info(f"💾 Results saved to: {filename}")
 
     # Also save detailed report
     report_filename = filename.replace('.csv', '_report.txt')
@@ -335,32 +419,76 @@ def save_results_to_csv(all_results, filename: str = "evaluation_results.csv"):
             else:
                 f.write(f"  {metric}: Metric not found\n")
 
-    print(f"📄 Report saved to: {report_filename}")
+    logger.info(f"📄 Report saved to: {report_filename}")
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Run RAGAS evaluation framework on Smart Pantry retrieval methods.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python evaluation.py              # Run evaluation with default output
+  python evaluation.py --verbose    # Show detailed debug output
+  python evaluation.py --quiet      # Only show errors
+        """
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable debug output"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Only show errors"
+    )
+    return parser.parse_args()
+
+
+def setup_logging(verbose: bool = False, quiet: bool = False):
+    """Configure logging based on verbosity flags."""
+    if quiet:
+        level = logging.ERROR
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",  # Simple format — just the message, no timestamps
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
+
 def main():
     """Run the RAGAS evaluation framework."""
-    print("\n" + "="*80)
-    print("🧪 SMART PANTRY - RAGAS EVALUATION FRAMEWORK")
-    print("="*80)
+    args = parse_args()
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
+
+    logger.info("=" * 80)
+    logger.info("🧪 SMART PANTRY - RAGAS EVALUATION FRAMEWORK")
+    logger.info("=" * 80)
 
     # Check if database exists
     if not os.path.exists(CHROMA_PATH):
-        print(f"❌ Vector database not found at {CHROMA_PATH}")
-        print("   Run 'python ingest.py' first to create it.")
+        logger.error(f"❌ Vector database not found at {CHROMA_PATH}")
+        logger.error("   Run 'python ingest.py' first to create it.")
         sys.exit(1)
 
     # Initialize components
-    print("\n📚 Initializing components...")
+    logger.info("📚 Initializing components...")
     vectorstore = initialize_vectorstore()
     bm25_retriever, semantic_retriever = initialize_hybrid_retriever(vectorstore)
 
     # Use Groq API for fast, reliable evaluation
-    print("   Initializing Groq LLM (llama-3.1-8b-instant)...")
+    logger.debug("   Initializing Groq LLM (llama-3.1-8b-instant)...")
     llm = ChatGroq(
         model="llama-3.1-8b-instant",  # Efficient 8B model for faster evaluation with lower token usage
         temperature=0,  # Deterministic for evaluation
@@ -369,9 +497,9 @@ def main():
         groq_api_key=os.getenv("GROQ_API_KEY")
     )
 
-    print(f"✓ Vector database loaded")
-    print(f"✓ BM25 and Semantic retrievers ready")
-    print(f"✓ LLM initialized (Groq Llama-3.1-8B, n=1 for RAGAS compatibility)")
+    logger.info("✓ Vector database loaded")
+    logger.info("✓ BM25 and Semantic retrievers ready")
+    logger.info("✓ LLM initialized (Groq Llama-3.1-8B, n=1 for RAGAS compatibility)")
 
     # Define retrieval methods to evaluate
     methods = {
@@ -381,12 +509,12 @@ def main():
         "Hybrid + Reranking": lambda q: retrieve_hybrid_with_reranking(bm25_retriever, semantic_retriever, q)
     }
 
-    print(f"\n📋 Test cases: {len(TEST_CASES)}")
-    print(f"🔬 Methods to evaluate: {len(methods)}")
-    print(f"   1. Semantic Only (baseline)")
-    print(f"   2. BM25 Only (keyword)")
-    print(f"   3. Hybrid (RRF)")
-    print(f"   4. Hybrid + Cross-Encoder Reranking ⭐")
+    logger.info(f"📋 Test cases: {len(TEST_CASES)}")
+    logger.info(f"🔬 Methods to evaluate: {len(methods)}")
+    logger.info("   1. Semantic Only (baseline)")
+    logger.info("   2. BM25 Only (keyword)")
+    logger.info("   3. Hybrid (RRF)")
+    logger.info("   4. Hybrid + Cross-Encoder Reranking ⭐")
 
     # Run evaluation for each method
     all_results = {}
@@ -403,22 +531,22 @@ def main():
             all_results[method_name] = results
 
         except Exception as e:
-            print(f"❌ Error evaluating {method_name}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"❌ Error evaluating {method_name}: {e}")
+            logger.exception("Traceback:")
 
     # Display comparison
     if all_results:
         compare_methods(all_results)
         save_results_to_csv(all_results)
 
-    print("\n✅ Evaluation complete!")
-    print("\n💡 Next steps:")
-    print("   1. Review the results above")
-    print("   2. Implement cross-encoder reranking")
-    print("   3. Re-run evaluation to measure improvement")
-    print("   4. Tune hybrid search weights if needed")
-    print("\n📖 Learn more about RAGAS: https://docs.ragas.io/")
+    logger.info("✅ Evaluation complete!")
+    logger.info("")
+    logger.info("💡 Next steps:")
+    logger.info("   1. Review the results above")
+    logger.info("   2. Check evaluation_results.csv for raw data")
+    logger.info("   3. Compare methods and tune if needed")
+    logger.info("")
+    logger.info("📖 Learn more about RAGAS: https://docs.ragas.io/")
 
 
 if __name__ == "__main__":

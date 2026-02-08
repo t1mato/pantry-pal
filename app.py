@@ -1,19 +1,66 @@
 """
-Smart Pantry & Diet Guardian - Streamlit Application (Hybrid Search Edition)
+Smart Pantry - AI Recipe Assistant
 
-This app helps you find recipes based on ingredients you have at home.
-It retrieves recipes from your local PDF cookbook database and adapts them
-to your dietary restrictions using AI.
-
-Features:
-- 🔄 **Hybrid Search**: Combines BM25 (keyword) + Semantic (meaning) search
-- 🎯 **RRF Fusion**: Reciprocal Rank Fusion for optimal result ranking
-- 🍳 **Ingredient-based recipe search**
-- 🥗 **Dietary restriction filtering**
-- 📚 **Source transparency** (shows which cookbook/page)
+A chatbot-style recipe finder powered by hybrid search (BM25 + Semantic)
+with cross-encoder reranking. Ask naturally about what you want to cook!
 """
 
 import streamlit as st
+
+# ============================================================================
+# MINIMAL STYLING (theme colors in .streamlit/config.toml)
+# ============================================================================
+
+CUSTOM_CSS = """
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+    html, body, [class*="css"] { font-family: 'Space Grotesk', sans-serif; }
+
+    #MainMenu, header, footer { visibility: hidden; }
+
+    /* Center the page horizontally and vertically */
+    .block-container {
+        max-width: 600px !important;
+        margin-left: auto !important;
+        margin-right: auto !important;
+        padding-top: 15vh !important;
+        padding-bottom: 5vh !important;
+    }
+
+    /* Title and subtitle */
+    h1 { text-align: center !important; font-size: 5rem !important; color: #5a7d5a !important; margin-bottom: 0.25rem !important; }
+    [data-testid="stCaptionContainer"] { font-size: 1.2rem !important; text-align: center !important; width: 100% !important; margin-bottom: 1rem !important; }
+    .stCaption { font-size: 1rem !important; }
+
+    /* Form labels */
+    .label { font-size: 0.85rem; font-weight: 600; text-transform: uppercase;
+             letter-spacing: 0.5px; color: #6b7d6b; margin-bottom: 0.5rem; text-align: center; }
+
+    /* Input fields */
+    .stTextArea textarea, .stTextInput input { font-size: 1.1rem !important; }
+    .stButton button { font-size: 1.1rem !important; padding: 0.75rem 1.5rem !important; }
+
+    @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+
+    .skeleton { background: linear-gradient(90deg, #e8ede8 25%, #f0f4f0 50%, #e8ede8 75%);
+                background-size: 200% 100%; animation: shimmer 1.5s infinite;
+                border-radius: 0.25rem; height: 1rem; margin: 0.5rem 0; }
+    .skeleton-title { height: 1.25rem; width: 50%; margin-bottom: 1rem; }
+    .skeleton-short { width: 75%; }
+</style>
+"""
+
+SKELETON_HTML = """
+<div style="padding:1.5rem; background:#f0f4f0; border-radius:0.5rem; border:1px solid #dce5dc;">
+    <div class="skeleton skeleton-title"></div>
+    <div class="skeleton"></div>
+    <div class="skeleton skeleton-short"></div>
+    <div style="height:1rem;"></div>
+    <div class="skeleton"></div>
+    <div class="skeleton skeleton-short"></div>
+</div>
+"""
 
 # Import shared utilities from core module
 from core import (
@@ -55,19 +102,19 @@ def get_llm():
 # SEARCH FUNCTIONS
 # ============================================================================
 
-def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restrictions,
+def search_recipes_hybrid(bm25_retriever, semantic_retriever, user_query, restrictions,
                          num_results=NUM_RESULTS, use_reranking=False):
     """
     Search for recipes using hybrid retrieval.
 
     This is a thin wrapper around core.search_hybrid that:
-    1. Constructs a recipe-specific query from ingredients + restrictions
+    1. Combines user query with dietary restrictions (if any)
     2. Delegates to the core search function
 
     Args:
         bm25_retriever: BM25 keyword retriever
         semantic_retriever: Semantic vector retriever
-        ingredients (str): User's available ingredients
+        user_query (str): Natural language query from user
         restrictions (str): Dietary restrictions
         num_results (int): Number of results to retrieve
         use_reranking (bool): Whether to apply cross-encoder reranking
@@ -75,10 +122,10 @@ def search_recipes_hybrid(bm25_retriever, semantic_retriever, ingredients, restr
     Returns:
         list: List of Document objects with recipe chunks and metadata
     """
-    # Construct recipe-specific search query
-    query = f"Recipes using: {ingredients}"
+    # Use user's natural language query directly
+    query = user_query
     if restrictions:
-        query += f" that can be made {restrictions}"
+        query += f" (dietary restrictions: {restrictions})"
 
     # Delegate to core search function
     return search_hybrid(
@@ -100,73 +147,32 @@ def main():
     """
     # Page configuration
     st.set_page_config(
-        page_title="🍳 Smart Pantry & Diet Guardian",
-        page_icon="🍳",
-        layout="wide"
+        page_title="PantryPal",
+        layout="centered"
     )
 
-    # Header
-    st.title("🍳 Smart Pantry & Diet Guardian")
-    st.markdown(
-        "Find delicious recipes based on what's in your pantry, "
-        "adapted to your dietary needs. All recipes are sourced from real cookbooks."
-    )
+    # Inject custom CSS
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-    # Sidebar for configuration and info
+    # Simple header
+    st.title("PantryPal")
+    st.caption("Make the most of your pantry with a click of a button.")
+
+    # Sidebar - Minimal
     with st.sidebar:
-        st.header("ℹ️ About")
-        st.markdown(
-            """
-            This app uses **Hybrid Search**:
-            - 🔤 **BM25**: Keyword matching for exact ingredients
-            - 🧠 **Semantic**: Understands meaning & synonyms
-            - 🎯 **RRF Fusion**: Combines both for best results
-            - 🤖 **AI Adaptation**: Google Gemini adapts recipes
-            """
-        )
+        st.markdown("### About")
+        st.markdown("""
+        Smart Pantry searches real cookbooks using AI to find and adapt recipes based on your ingredients.
+        """)
 
-        st.divider()
+        st.markdown("---")
 
-        st.header("⚙️ Settings")
-        num_results = st.slider(
-            "Number of recipes to search",
-            min_value=1,
-            max_value=10,
-            value=NUM_RESULTS,
-            help="More results = more context but slower"
-        )
+        st.caption("Built by [t1mato](https://github.com/t1mato)")
 
-        st.divider()
-
-        # Cross-encoder reranking toggle
-        use_reranking = st.checkbox(
-            "🎯 Enable Cross-Encoder Reranking",
-            value=True,
-            help="Uses a more powerful model to rerank results for better precision. Adds ~100ms latency."
-        )
-
-        if use_reranking:
-            st.info(
-                "**Cross-Encoder is ON** ✅\n\n"
-                "Results are reranked using a specialized model "
-                "for improved relevance."
-            )
-
-        st.divider()
-
-        # Debug mode - retrieval only (no LLM)
-        debug_mode = st.checkbox(
-            "🔧 Debug Mode (Retrieval Only)",
-            value=False,
-            help="Show retrieved documents without calling Gemini API. Useful for testing retrieval quality without using API quota."
-        )
-
-        if debug_mode:
-            st.warning(
-                "**Debug Mode is ON** 🔧\n\n"
-                "Will show retrieved documents only (no recipe generation). "
-                "Use this to compare cross-encoder ON vs OFF without using API quota."
-            )
+    # Settings: use sensible defaults (no UI clutter)
+    num_results = NUM_RESULTS  # Default: 5
+    use_reranking = True       # Always on — better results
+    debug_mode = st.query_params.get("debug", "false").lower() == "true"  # Hidden: ?debug=true
 
 
     # Initialize components (cached — only runs once, not on every re-render)
@@ -193,52 +199,46 @@ def main():
         st.error(f"❌ Unexpected error: {e}")
         st.stop()
 
-    # Main input form
-    st.divider()
-    st.header("🥘 What's in your pantry?")
+    # Main query input
+    st.markdown('<p class="label">Ingredients</p>', unsafe_allow_html=True)
+    user_query = st.text_area(
+        "Ingredients",
+        placeholder="I have chicken, rice, and some vegetables...",
+        height=100,
+        label_visibility="collapsed"
+    )
 
-    col1, col2 = st.columns(2)
+    # Dietary restrictions
+    st.markdown('<p class="label">Dietary Restrictions</p>', unsafe_allow_html=True)
+    restrictions = st.text_input(
+        "Dietary Restrictions",
+        placeholder="e.g. vegetarian, gluten-free, no dairy",
+        label_visibility="collapsed"
+    )
 
-    with col1:
-        ingredients = st.text_area(
-            "Available Ingredients",
-            placeholder="e.g., chicken breast, rice, bell peppers, onion",
-            height=100,
-            help="List the ingredients you have available"
-        )
-
-    with col2:
-        restrictions = st.text_area(
-            "Dietary Restrictions (Optional)",
-            placeholder="e.g., vegetarian, gluten-free, no cilantro",
-            height=100,
-            help="Any dietary restrictions or preferences"
-        )
-
-    # Search button
-    search_button = st.button("🔍 Find Recipes", type="primary", use_container_width=True)
+    st.write("")  # Spacing
+    search_button = st.button("Find recipes", type="primary", use_container_width=True)
 
     # Process search
     if search_button:
-        if not ingredients.strip():
-            st.warning("⚠️ Please enter at least one ingredient.")
+        if not user_query.strip():
+            st.warning("⚠️ Please enter a question or describe what you'd like to cook.")
             return
 
-        # Show search status
-        search_message = "🔍 Searching cookbook database with hybrid search (BM25 + Semantic + RRF)"
-        if use_reranking:
-            search_message += " + Cross-Encoder Reranking"
-        search_message += "..."
+        # Show skeleton while loading
+        skeleton_placeholder = st.empty()
+        skeleton_placeholder.markdown(SKELETON_HTML, unsafe_allow_html=True)
 
-        with st.spinner(search_message):
-            search_results = search_recipes_hybrid(
-                bm25_retriever,
-                semantic_retriever,
-                ingredients,
-                restrictions,
-                num_results=num_results,
-                use_reranking=use_reranking
-            )
+        search_results = search_recipes_hybrid(
+            bm25_retriever,
+            semantic_retriever,
+            user_query,
+            restrictions,
+            num_results=num_results,
+            use_reranking=use_reranking
+        )
+
+        skeleton_placeholder.empty()
 
         if not search_results:
             st.warning("😔 No recipes found. Try different ingredients or add more cookbooks.")
@@ -247,46 +247,40 @@ def main():
         # Debug mode: Show retrieved documents only (no LLM generation)
         if debug_mode:
             st.divider()
-            st.header("🔍 Retrieved Recipe Chunks (Debug Mode)")
-            st.info(f"**Found {len(search_results)} relevant chunks**. Toggle cross-encoder ON/OFF to compare results.")
+            st.subheader(f"🔍 Debug: {len(search_results)} chunks retrieved")
 
             for i, doc in enumerate(search_results, 1):
-                with st.container():
-                    st.markdown(f"### 📄 Rank #{i}")
-                    st.markdown(f"**Source:** {doc.metadata.get('source', 'Unknown')} (Page {doc.metadata.get('page', 'Unknown')})")
-                    st.markdown("**Content:**")
-                    st.text_area(
-                        f"Chunk {i}",
-                        doc.page_content,
-                        height=200,
-                        key=f"doc_{i}",
-                        label_visibility="collapsed"
-                    )
-                    st.divider()
+                source = doc.metadata.get('source', 'Unknown').split('/')[-1]
+                page = doc.metadata.get('page', '?')
+                with st.expander(f"**#{i}** — {source}, p.{page}", expanded=(i == 1)):
+                    st.text(doc.page_content)
 
         # Normal mode: Generate recipe with LLM
         else:
             # Format context
             context = format_context(search_results)
 
-            # Generate recipe
-            with st.spinner("🤖 Adapting recipe to your needs..."):
-                recipe = generate_recipe(llm, context, ingredients, restrictions)
+            # Generate recipe with skeleton loading
+            recipe_placeholder = st.empty()
+            recipe_placeholder.markdown(SKELETON_HTML, unsafe_allow_html=True)
+            recipe = generate_recipe(llm, context, user_query, restrictions)
+            recipe_placeholder.empty()
 
             # Display result
-            st.divider()
-            st.header("📖 Your Recipe")
+            st.markdown("---")
             st.markdown(recipe)
 
-            # Show retrieved context in expander
-            with st.expander("🔍 View Source Recipe Chunks"):
-                st.markdown("*These are the cookbook excerpts used to generate your recipe:*")
+            # Show sources in expander
+            with st.expander("📚 Sources from cookbook"):
                 for i, doc in enumerate(search_results, 1):
-                    st.markdown(f"**Chunk {i}**")
-                    st.markdown(f"*Source: {doc.metadata.get('source', 'Unknown')} "
-                              f"(Page {doc.metadata.get('page', 'Unknown')})*")
-                    st.text(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
-                    st.divider()
+                    source = doc.metadata.get('source', 'Unknown').split('/')[-1]
+                    page = doc.metadata.get('page', '?')
+                    st.caption(f"**[{i}]** {source}, page {page}")
+                    st.code(doc.page_content[:400] + "..." if len(doc.page_content) > 400 else doc.page_content, language=None)
+
+    # Footer
+    st.write("")
+    st.caption("[GitHub](https://github.com/t1mato/smart-pantry)")
 
 
 # ============================================================================

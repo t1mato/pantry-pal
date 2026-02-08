@@ -25,6 +25,10 @@ langchain-groq
 # Frontend
 streamlit
 
+# REST API
+fastapi
+uvicorn[standard]
+
 # Document processing
 pypdf
 

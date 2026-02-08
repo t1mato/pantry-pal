@@ -1,0 +1,10 @@
+[theme]
+# Soft Sage - fresh, natural, light
+primaryColor = "#5a7d5a"
+backgroundColor = "#f8faf8"
+secondaryBackgroundColor = "#f0f4f0"
+textColor = "#2d3830"
+font = "sans serif"
+
+[server]
+headless = true

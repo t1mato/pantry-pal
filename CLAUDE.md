@@ -8,21 +8,24 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 
 ## Architecture
 
-### Three-Phase System
+### Three-Phase Pipeline
 1. **Ingestion** (`ingest.py`): PDF → text chunks → local embeddings → ChromaDB (batch support with deduplication)
 2. **Hybrid Retrieval** (`core/retrieval.py`): BM25 + Semantic → RRF fusion → cross-encoder reranking (optional)
-3. **Generation** (`app.py`): Context → Gemini → formatted recipe
-4. **Evaluation** (`evaluation.py`): RAGAS metrics via Groq API
+3. **Generation** (`core/llm.py`): Context → Gemini → formatted recipe (served via `app.py` Streamlit UI)
+
+### Evaluation (offline)
+- **`evaluation.py`**: RAGAS metrics via Groq API — runs independently from the user-facing pipeline
 
 ### Module Structure
-- **`core/`** — Shared utilities module (config, retrieval algorithms, embeddings)
+- **`core/`** — Shared utilities module (config, retrieval algorithms, embeddings, LLM)
   - `config.py`: All configuration constants (single source of truth)
-  - `retrieval.py`: RRF fusion, cross-encoder reranking, hybrid search, format_context
+  - `retrieval.py`: RRF fusion, cross-encoder reranking (cached), hybrid search, format_context
   - `embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
+  - `llm.py`: LLM initialization, recipe generation, prompt template (shared by app + evaluation)
   - `__init__.py`: Clean public API for imports
-- **`app.py`** — Streamlit UI + LLM-specific functions (initialize_llm, generate_recipe)
+- **`app.py`** — Streamlit UI only (imports LLM functions from `core`, uses `@st.cache_resource`)
 - **`ingest.py`** — PDF processing, batch ingestion, deduplication
-- **`evaluation.py`** — RAGAS evaluation (imports from `core` + 2 LLM functions from `app`)
+- **`evaluation.py`** — RAGAS evaluation (imports everything from `core`, no dependency on `app`)
 - **`tests/`** — pytest suite with fixtures and unit tests
 
 ### Key Components
@@ -71,85 +74,29 @@ Smart Pantry is an advanced RAG application for recipe discovery from PDF cookbo
 
 ## Development Commands
 
-### Environment Setup
+See `README.md` for setup, installation, and usage commands. Key quick-reference:
+
 ```bash
-# Use Python 3.10+ (3.9 has compatibility issues)
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Ingestion
-```bash
-# Process default PDF
-python ingest.py
-
-# Process specific PDF
-python ingest.py data/cookbook.pdf
-
-# Batch mode: process all PDFs in a directory
-python ingest.py data/
-```
-
-**Features:**
-- Batch ingestion: pass a directory to process all PDFs
-- Duplicate detection: skips already-ingested files (checks ChromaDB metadata)
-- Appends to existing database (doesn't overwrite)
-
-**Output:** Creates/updates `./chroma_db/` with embedded recipe chunks
-
-### Run Application
-```bash
-streamlit run app.py
-```
-
-**URL:** http://localhost:8501
-
-### Run RAGAS Evaluation
-```bash
-# Requires GROQ_API_KEY in .env
-python evaluation.py
-```
-
-**Output**:
-- `evaluation_results.csv` - Raw metric scores
-- `evaluation_results_report.txt` - Auto-generated summary
-- Duration: ~35 minutes for 3 test cases × 4 methods
-
-**Note:** Use legacy `ragas.metrics` API (not `ragas.metrics.collections`) for LangChain/Groq compatibility.
-
-### Reset Database
-```bash
-rm -rf chroma_db/
-python ingest.py
+python ingest.py              # Ingest default PDF
+python ingest.py data/        # Batch ingest all PDFs in folder
+python ingest.py --verbose    # Show debug output
+python ingest.py --quiet      # Only show errors
+streamlit run app.py          # Run the app (http://localhost:8501)
+uvicorn api:app --reload      # Run REST API (http://localhost:8000)
+python evaluation.py          # Run RAGAS evaluation
+python evaluation.py --verbose  # Evaluation with debug output
+rm -rf chroma_db/ && python ingest.py  # Reset database
 ```
 
 ## Configuration
 
-### Critical Settings
+**All configuration is centralized in `core/config.py`** — single source of truth. See `README.md` for the full settings reference.
 
-**All configuration is centralized in `core/config.py`** — no more duplicate constants across files.
-
-**core/config.py** (single source of truth):
-- `EMBEDDING_MODEL = "all-MiniLM-L6-v2"` - shared across all modules
-- `CHUNK_SIZE = 2000` / `CHUNK_OVERLAP = 200`
-- `CHUNK_SEPARATORS = ["\n\n", "Title:", "Ingredients:"]`
-- `GEMINI_MODEL = "gemini-flash-latest"`
-- `NUM_RESULTS = 5` - final number of results returned
-- `RERANK_TOP_K = 10` - candidates for cross-encoder reranking
-- `CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"`
-- `GROQ_MODEL = "llama-3.1-8b-instant"` - for RAGAS evaluation
-
-**evaluation.py** (evaluation-specific):
-- `TEST_CASES = 3` - recipe queries for evaluation
+**Evaluation-specific settings** (in `evaluation.py`):
+- `TEST_CASES = 15` - diverse queries across 5 categories (ingredients, dietary, budget, cuisine, meal type)
 - `AnswerRelevancy(strictness=1)` - CRITICAL: Groq only supports n=1
 - Use `ragas.metrics` (legacy), NOT `ragas.metrics.collections`
-
-### Environment Variables
-- `GOOGLE_API_KEY` - required for Gemini, stored in `.env` (gitignored)
-- NOT required for ingestion (uses local embeddings)
+- Supports `--verbose` / `--quiet` flags for log level control
 
 ## Important Implementation Details
 
@@ -226,42 +173,32 @@ embeddings = create_embeddings()  # Guarantees consistent config
 
 ### Code Organization
 - Configuration centralized in `core/config.py` (single source of truth)
-- Shared retrieval algorithms in `core/retrieval.py`
+- Shared retrieval algorithms in `core/retrieval.py` (cross-encoder model cached at module level)
 - Shared embedding setup in `core/embeddings.py`
-- `app.py` contains only UI logic and LLM-specific functions
+- Shared LLM functions in `core/llm.py` (initialize_llm, generate_recipe, prompt template)
+- `app.py` contains only Streamlit UI logic (uses `@st.cache_resource` for performance)
 - `ingest.py` contains only PDF processing and batch ingestion logic
-- `evaluation.py` imports from `core` (decoupled from `app.py`)
+- `evaluation.py` imports entirely from `core` (fully decoupled from `app.py`)
 - Helper functions with comprehensive docstrings
 - Main execution in `main()` function
 
 ## Dependencies
 
-**Key packages (see requirements.txt for versions):**
-- `langchain` + integrations (core framework)
-- `chromadb` + `langchain-chroma` (vector store)
-- `sentence-transformers==3.0.1` (pinned for stability, includes cross-encoder)
-- `langchain-huggingface` (local embeddings)
-- `langchain-google-genai` (Gemini integration)
-- `langchain-groq` (Groq API for evaluation)
-- `rank-bm25` (BM25 keyword search)
-- `ragas` (RAG evaluation framework)
-- `datasets` (RAGAS dependency)
-- `streamlit` (web UI)
-- `pypdf` (PDF processing)
-
-**Important:**
-- `sentence-transformers` must be 3.0.1 to avoid PyTorch compatibility issues
-- Use `ragas.metrics` (legacy API), not `ragas.metrics.collections` (requires InstructorLLM)
+See `requirements.txt` for the full list. Critical version pins:
+- `sentence-transformers==3.0.1` — **must** be pinned; v5.2.0 causes `Cannot copy out of meta tensor`
+- `ragas` — use `ragas.metrics` (legacy API), NOT `ragas.metrics.collections` (requires InstructorLLM)
+- `numpy<2.0` — required for compatibility with sentence-transformers 3.x
 
 ## File Purposes
 
 - `core/config.py`: Centralized configuration constants (single source of truth)
-- `core/retrieval.py`: RRF fusion, cross-encoder reranking, hybrid search, format_context
+- `core/retrieval.py`: RRF fusion, cross-encoder reranking (model cached), hybrid search, format_context
 - `core/embeddings.py`: Embedding model creation, vectorstore initialization, hybrid retriever setup
+- `core/llm.py`: LLM initialization, recipe generation, prompt template (shared by app + evaluation)
 - `core/__init__.py`: Package exports for clean imports
-- `app.py`: Streamlit UI, LLM initialization, recipe generation (imports from `core`)
+- `app.py`: Streamlit UI only, uses `@st.cache_resource` for cached initialization (imports from `core`)
 - `ingest.py`: PDF processing, batch ingestion, deduplication (imports from `core`)
-- `evaluation.py`: RAGAS evaluation framework, tests 4 retrieval methods (imports from `core` + `app`)
+- `evaluation.py`: RAGAS evaluation framework, tests 4 retrieval methods (imports from `core` only)
 - `tests/conftest.py`: Shared pytest fixtures (mock recipe data)
 - `tests/test_retrieval.py`: Unit tests for RRF and format_context (11 tests)
 - `pytest.ini`: Test configuration
@@ -273,93 +210,35 @@ embeddings = create_embeddings()  # Guarantees consistent config
 
 ## Testing
 
-### Unit Tests (pytest)
 ```bash
-# Run all tests
-python -m pytest tests/ -v
-
-# Run specific test class
-python -m pytest tests/test_retrieval.py::TestReciprocalRankFusion -v
-
-# Run single test
-python -m pytest tests/test_retrieval.py::TestFormatContext::test_handles_missing_metadata -v
+python -m pytest tests/ -v          # Run all 11 tests
 ```
-
-**Test coverage:** 11 tests covering:
-- `reciprocal_rank_fusion()`: combining results, deduplication, k parameter, edge cases
-- `format_context()`: metadata inclusion, content formatting, missing metadata handling
 
 **Test structure:**
 - `tests/conftest.py`: Shared fixtures (mock Document objects, simulated retriever results)
-- `tests/test_retrieval.py`: Unit tests for core retrieval functions
+- `tests/test_retrieval.py`: Unit tests for `reciprocal_rank_fusion()` and `format_context()`
 
-### Manual Verification
-
-**Verify installation:**
-```python
-python -c "from langchain_huggingface import HuggingFaceEmbeddings; print('OK')"
-python -c "from langchain_google_genai import ChatGoogleGenerativeAI; print('OK')"
-python -c "from core import create_embeddings; print('OK')"
-```
-
-**Test ingestion:**
+**Quick verification after changes:**
 ```bash
-python ingest.py
-# Should complete in ~2 seconds for 90-page PDF
-```
-
-**Test embeddings:**
-```python
-from core import create_embeddings
-embeddings = create_embeddings()
-test = embeddings.embed_query("test")
-print(f"Embedding dimension: {len(test)}")  # Should be 384
-```
-
-**Test vector store:**
-```python
-from core import initialize_vectorstore
-vectorstore = initialize_vectorstore()
-results = vectorstore.similarity_search("chicken recipe", k=2)
-print(f"Found {len(results)} results")
+python -c "from core import create_embeddings, initialize_llm, generate_recipe; print('OK')"
 ```
 
 ## Performance Characteristics
 
-### Speed
-- **Ingestion:** ~2s for 90-page PDF
-- **Query latency:** 2-5s (search + generation), +200ms with reranking
-- **Storage:** ~3MB per cookbook
-- **Evaluation:** ~35 minutes for 3 test cases × 4 methods
+See `README.md` for full performance tables and cost breakdown. See `EVALUATION_RESULTS.md` for detailed RAGAS analysis.
 
-### Quality (RAGAS Evaluation Results)
-| Method | Context Precision | Context Recall | Faithfulness | Answer Relevancy |
-|--------|-------------------|----------------|--------------|------------------|
-| **Hybrid + Reranking** | 66.8% | **100%** | 88.4% | **59.5%** ⭐ |
-| Hybrid (RRF) | 73.3% | **100%** | 88.6% | 53.4% |
-| Semantic Only | 79.6% | 93.3% | 86.1% | 58.7% |
-| BM25 Only | 60.2% | **100%** | 75.0% | 42.0% |
-
-**Key Findings:**
-- Cross-encoder reranking achieves **best answer relevancy** (59.5%, +6.1% vs basic hybrid)
-- Hybrid methods achieve **perfect recall** (100% - users won't miss recipes)
-- Trade-off: Lower precision (66.8%) but better final answer quality
-- **Recommendation**: Use Hybrid + Reranking for production
-
-See `EVALUATION_RESULTS.md` for detailed analysis.
-
-### Cost
-- **Embeddings:** $0 (local HuggingFace)
-- **Vector DB:** $0 (local ChromaDB)
-- **Generation:** ~$0.0001/query (Gemini free tier: 1500 req/day)
-- **Evaluation:** $0 (Groq free tier)
-- **Total:** **Free** for typical usage
+**Key facts for development:**
+- **Recommendation:** Use Hybrid + Reranking for production (best answer relevancy at 59.5%)
+- **Reranking adds ~200ms** latency but +6.1% answer quality — worth the tradeoff
+- **All costs are $0** — local embeddings, local vector DB, Gemini/Groq free tiers
 
 ## Future Considerations
 
 - ~~Batch PDF ingestion~~ ✅ Implemented (folder support + deduplication)
 - ~~Modular architecture~~ ✅ Implemented (`core/` module)
 - ~~Unit tests~~ ✅ Implemented (pytest with 11 tests)
+- ~~Decouple evaluation from app~~ ✅ Implemented (LLM functions moved to `core/llm.py`)
+- ~~Performance caching~~ ✅ Implemented (`@st.cache_resource` + cross-encoder model cache)
 - GPU acceleration for embeddings (change `device: "cpu"` to `"cuda"` in `core/embeddings.py`)
 - Recipe deduplication across cookbooks (content-level, not just file-level)
 - Caching frequently requested recipes

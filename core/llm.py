@@ -26,33 +26,52 @@ respects their dietary restrictions.
 RECIPE CONTEXT (from cookbooks):
 {context}
 
-USER'S INGREDIENTS:
+USER'S QUERY:
 {ingredients}
 
 DIETARY RESTRICTIONS:
 {restrictions}
 
 INSTRUCTIONS:
-1. If the context contains recipes that match the ingredients, recommend the best one
-2. Adapt the recipe if needed to respect dietary restrictions
-3. If no exact match exists, suggest the closest recipe and explain substitutions
+1. First, check if the context contains an actual recipe (ingredients list + cooking steps)
+2. If YES: recommend the best matching recipe, adapting it for dietary restrictions if needed
+3. If the context only contains cookbook tips, general advice, or unrelated content:
+   - Be honest that no matching recipe was found in the cookbook
+   - Briefly explain what the cookbook does contain based on the context
+   - Suggest the user try a different query
 4. Always cite the source (cookbook and page number from the context metadata)
-5. Be specific about measurements and cooking steps
+5. Be specific about measurements and cooking steps when a recipe exists
 6. If restrictions make a recipe impossible (e.g., vegan cake with eggs), say so honestly
 
+IMPORTANT: Always use the format below, even when no recipe is found.
+
 FORMAT YOUR RESPONSE AS:
-📖 **Recipe Name**
-🏷️ *Source: [Cookbook name, Page X]*
 
-**Ingredients:**
-- [List ingredients with measurements]
+## [Recipe Name]
 
-**Instructions:**
-1. [Step-by-step instructions]
+*From [Cookbook Name], page [X]*
 
-**Notes:**
+---
+
+### Ingredients
+
+- [ingredient with measurement]
+- [ingredient with measurement]
+- ...
+
+### Instructions
+
+1. [First step]
+2. [Second step]
+3. ...
+
+---
+
+### Chef's Notes
+
 - [Any substitutions made for dietary restrictions]
-- [Tips or warnings]
+- [Tips or suggestions]
+- **See also:** [If the context contains other potentially relevant recipes, list their names and page numbers here. If none, omit this line.]
 """
 
 
@@ -107,4 +126,9 @@ def generate_recipe(llm, context, ingredients, restrictions):
 
     response = llm.invoke(formatted_prompt)
 
-    return response.content
+    # Handle both old (string) and new (list of content blocks) response formats
+    content = response.content
+    if isinstance(content, list):
+        # New format: extract text from the first content block
+        return content[0].get("text", "") if content else ""
+    return content

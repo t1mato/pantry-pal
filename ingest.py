@@ -7,7 +7,7 @@ It uses local embeddings (HuggingFace) to avoid API rate limits and costs.
 Supports both single file and batch ingestion with duplicate detection.
 
 Usage:
-    python ingest.py [path]
+    python ingest.py [path] [--verbose | --quiet]
 
     path can be:
     - A single PDF file: python ingest.py data/my-cookbook.pdf
@@ -18,10 +18,15 @@ Examples:
     python ingest.py data/my-cookbook.pdf     # Single file
     python ingest.py data/                   # All PDFs in folder
     python ingest.py                         # Default PDF
+    python ingest.py --verbose               # Show debug output
+    python ingest.py --quiet                 # Only show errors
 """
 
+import argparse
+import logging
 import sys
 from pathlib import Path
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -41,6 +46,9 @@ from core import (
 
 # Load environment variables (for future API keys if needed)
 load_dotenv()
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -79,9 +87,9 @@ def discover_pdfs(input_path):
         pdfs = sorted(path.glob("*.pdf"))
         if not pdfs:
             raise ValueError(f"No PDF files found in directory: {input_path}")
-        print(f"📁 Found {len(pdfs)} PDF(s) in {input_path}")
+        logger.info(f"📁 Found {len(pdfs)} PDF(s) in {input_path}")
         for pdf in pdfs:
-            print(f"   - {pdf.name}")
+            logger.info(f"   - {pdf.name}")
         return pdfs
 
     raise ValueError(f"Path is neither a file nor a directory: {input_path}")
@@ -140,8 +148,8 @@ def get_ingested_sources():
         # Extract unique source filenames
         sources = {meta.get('source', '') for meta in all_metadatas}
         return sources
-    except Exception:
-        # If database is corrupted or unreadable, start fresh
+    except Exception as e:
+        logger.warning(f"Could not read existing database, starting fresh: {e}")
         return set()
 
 
@@ -156,18 +164,18 @@ def load_pdf_documents(pdf_path):
         list: List of Document objects (one per page)
 
     Raises:
-        Exception: If PDF loading fails
+        RuntimeError: If PDF loading fails
     """
-    print(f"\n📖 Loading PDF: {pdf_path}")
+    logger.info(f"📖 Loading PDF: {pdf_path}")
 
     try:
         loader = PyPDFLoader(str(pdf_path))
         docs = loader.load()
-        print(f"✓ Loaded {len(docs)} pages")
+        logger.info(f"✓ Loaded {len(docs)} pages")
         return docs
 
     except Exception as e:
-        raise Exception(f"Failed to load PDF: {e}")
+        raise RuntimeError(f"Failed to load PDF {pdf_path}") from e
 
 
 def split_documents(docs):
@@ -186,10 +194,10 @@ def split_documents(docs):
     Returns:
         list: List of smaller Document chunks
     """
-    print(f"\n✂️  Splitting documents into chunks...")
-    print(f"   Chunk size: {CHUNK_SIZE} characters")
-    print(f"   Overlap: {CHUNK_OVERLAP} characters")
-    print(f"   Separators: {CHUNK_SEPARATORS}")
+    logger.info("✂️  Splitting documents into chunks...")
+    logger.debug(f"   Chunk size: {CHUNK_SIZE} characters")
+    logger.debug(f"   Overlap: {CHUNK_OVERLAP} characters")
+    logger.debug(f"   Separators: {CHUNK_SEPARATORS}")
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -198,7 +206,7 @@ def split_documents(docs):
     )
 
     splits = text_splitter.split_documents(docs)
-    print(f"✓ Created {len(splits)} chunks")
+    logger.info(f"✓ Created {len(splits)} chunks")
 
     return splits
 
@@ -213,13 +221,13 @@ def initialize_embeddings():
     Returns:
         HuggingFaceEmbeddings: Embedding model instance
     """
-    print("\n🤖 Initializing local embedding model...")
-    print("   (First run will download ~120MB model)")
+    logger.info("🤖 Initializing local embedding model...")
+    logger.debug("   (First run will download ~120MB model)")
 
     # Use shared embedding configuration from core
     embeddings = create_embeddings()
 
-    print("✓ Embedding model ready")
+    logger.info("✓ Embedding model ready")
     return embeddings
 
 
@@ -237,8 +245,8 @@ def store_in_vectordb(splits, embeddings):
     Returns:
         Chroma: Vector store instance
     """
-    print(f"\n💾 Storing chunks in vector database: {CHROMA_PATH}")
-    print(f"   Processing {len(splits)} chunks in batches of {BATCH_SIZE}...")
+    logger.info(f"💾 Storing chunks in vector database: {CHROMA_PATH}")
+    logger.debug(f"   Processing {len(splits)} chunks in batches of {BATCH_SIZE}...")
 
     try:
         # Connect to existing database or create new one
@@ -252,11 +260,11 @@ def store_in_vectordb(splits, embeddings):
             vectorstore.add_documents(documents=splits)
             pbar.update(len(splits))
 
-        print(f"✓ Successfully stored {len(splits)} chunks")
+        logger.info(f"✓ Successfully stored {len(splits)} chunks")
         return vectorstore
 
     except Exception as e:
-        raise Exception(f"Failed to store documents in vector database: {e}")
+        raise RuntimeError(f"Failed to store documents in vector database") from e
 
 
 # ============================================================================
@@ -280,6 +288,55 @@ def ingest_single_pdf(pdf_path, embeddings):
     return len(docs), len(splits)
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Ingest PDF cookbooks into the Smart Pantry vector database.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python ingest.py                        # Ingest default cookbook
+  python ingest.py data/cookbook.pdf      # Ingest single file
+  python ingest.py data/                  # Ingest all PDFs in folder
+  python ingest.py --verbose              # Show detailed output
+  python ingest.py --quiet                # Only show errors
+        """
+    )
+    parser.add_argument(
+        "path",
+        nargs="?",
+        default=DEFAULT_PDF_PATH,
+        help=f"Path to PDF file or directory (default: {DEFAULT_PDF_PATH})"
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable debug output"
+    )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Only show errors"
+    )
+    return parser.parse_args()
+
+
+def setup_logging(verbose: bool = False, quiet: bool = False):
+    """Configure logging based on verbosity flags."""
+    if quiet:
+        level = logging.ERROR
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",  # Simple format — just the message, no timestamps
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
+
 def main():
     """
     Main execution function with batch support.
@@ -292,31 +349,29 @@ def main():
     5. Process each PDF: load → split → embed → store (skip duplicates)
     6. Report batch statistics
     """
-    print("=" * 70)
-    print("🍳 Smart Pantry - Document Ingestion")
-    print("=" * 70)
+    args = parse_args()
+    setup_logging(verbose=args.verbose, quiet=args.quiet)
 
-    # Step 1: Get path from command line or use default
-    if len(sys.argv) > 1:
-        input_path = sys.argv[1]
-        print(f"Input path: {input_path}")
-    else:
-        input_path = DEFAULT_PDF_PATH
-        print(f"Using default: {input_path}")
+    logger.info("=" * 70)
+    logger.info("🍳 Smart Pantry - Document Ingestion")
+    logger.info("=" * 70)
+
+    input_path = args.path
+    logger.info(f"Input path: {input_path}")
 
     try:
-        # Step 2: Discover PDFs (works with files and directories)
+        # Step 1: Discover PDFs (works with files and directories)
         pdf_paths = discover_pdfs(input_path)
 
-        # Step 3: Check which sources are already ingested
+        # Step 2: Check which sources are already ingested
         existing_sources = get_ingested_sources()
         if existing_sources:
-            print(f"\n📋 Already in database: {len(existing_sources)} source(s)")
+            logger.info(f"📋 Already in database: {len(existing_sources)} source(s)")
 
-        # Step 4: Initialize embedding model ONCE (shared across all PDFs)
+        # Step 3: Initialize embedding model ONCE (shared across all PDFs)
         embeddings = initialize_embeddings()
 
-        # Step 5: Process each PDF
+        # Step 4: Process each PDF
         total_pages = 0
         total_chunks = 0
         skipped = 0
@@ -325,7 +380,7 @@ def main():
         for pdf_path in pdf_paths:
             # Deduplication: skip PDFs already in the database
             if str(pdf_path) in existing_sources:
-                print(f"\nSkipping {pdf_path.name} (already ingested)")
+                logger.warning(f"Skipping {pdf_path.name} (already ingested)")
                 skipped += 1
                 continue
 
@@ -334,31 +389,33 @@ def main():
             total_chunks += chunks
             processed += 1
 
-        # Step 6: Report results
-        print("\n" + "=" * 70)
-        print("✅ SUCCESS!")
-        print("=" * 70)
-        print(f"📊 Batch Statistics:")
-        print(f"   - PDFs processed: {processed}")
-        print(f"   - PDFs skipped (already ingested): {skipped}")
-        print(f"   - Total pages: {total_pages}")
-        print(f"   - Total chunks: {total_chunks}")
-        print(f"   - Database location: {CHROMA_PATH}")
-        print(f"\n💡 Next step: Run 'streamlit run app.py' to query your recipes!")
-        print("=" * 70)
+        # Step 5: Report results
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("✅ SUCCESS!")
+        logger.info("=" * 70)
+        logger.info("📊 Batch Statistics:")
+        logger.info(f"   - PDFs processed: {processed}")
+        logger.info(f"   - PDFs skipped (already ingested): {skipped}")
+        logger.info(f"   - Total pages: {total_pages}")
+        logger.info(f"   - Total chunks: {total_chunks}")
+        logger.info(f"   - Database location: {CHROMA_PATH}")
+        logger.info("")
+        logger.info("💡 Next step: Run 'streamlit run app.py' to query your recipes!")
+        logger.info("=" * 70)
 
     except FileNotFoundError as e:
-        print(f"\n❌ ERROR: {e}")
-        print(f"💡 Make sure your PDF is in the correct location.")
+        logger.error(f"❌ ERROR: {e}")
+        logger.error("💡 Make sure your PDF is in the correct location.")
         sys.exit(1)
 
     except ValueError as e:
-        print(f"\n❌ ERROR: {e}")
+        logger.error(f"❌ ERROR: {e}")
         sys.exit(1)
 
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
-        print(f"💡 Check the error message above for details.")
+        logger.error(f"❌ ERROR: {e}")
+        logger.error("💡 Check the error message above for details.")
         sys.exit(1)
 
 

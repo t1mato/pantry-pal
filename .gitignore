@@ -7,4 +7,5 @@ __pycache__/
 chroma_db/
 .DS_Store
 Thumbs.db 
-data/*.pdf
+# Note: data/*.pdf is NOT ignored — sample cookbook is tracked for reviewers
+# The included "Good and Cheap" PDF is Creative Commons (CC BY-NC-SA)

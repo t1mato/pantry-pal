@@ -1,6 +1,13 @@
 # Smart Pantry & Diet Guardian
 
+[![Tests](https://github.com/t1mato/smart-pantry/actions/workflows/test.yml/badge.svg)](https://github.com/t1mato/smart-pantry/actions/workflows/test.yml)
+
 Advanced RAG-based recipe search with **hybrid retrieval** (BM25 + Semantic) and **cross-encoder reranking** for optimal recipe discovery from PDF cookbooks.
+
+<!-- TODO: Replace with actual screenshot of the Streamlit UI -->
+<!-- Run the app, search for a recipe, and capture a screenshot: -->
+<!-- Save it as assets/screenshot.png, then uncomment the line below -->
+<!-- ![Smart Pantry UI](assets/screenshot.png) -->
 
 ## Overview
 
@@ -37,7 +44,9 @@ Three-phase RAG system with rigorous RAGAS evaluation:
 - Google AI API key (https://ai.google.dev/) - for recipe generation
 - Groq API key (https://console.groq.com/) - optional, for RAGAS evaluation only
 
-## Installation
+## Quick Start
+
+A sample cookbook is included: [*Good and Cheap*](https://www.leannebrown.com/good-and-cheap/) by Leanne Brown (Creative Commons BY-NC-SA). No additional data needed.
 
 ```bash
 # Create virtual environment
@@ -51,19 +60,22 @@ pip install -r requirements.txt
 echo "GOOGLE_API_KEY=<your-key>" > .env
 echo "GROQ_API_KEY=<your-key>" >> .env  # Optional: for evaluation only
 
-# Ingest PDFs (single file or batch)
-python ingest.py                         # Default PDF
+# Ingest the included cookbook (or add your own PDFs to data/)
+python ingest.py                         # Default: Good and Cheap cookbook
 python ingest.py data/cookbook.pdf        # Single file
 python ingest.py data/                   # All PDFs in folder (batch mode)
 
-# Run application
+# Run Streamlit app
 streamlit run app.py
+
+# Or run REST API
+uvicorn api:app --reload
 ```
 
 ## Usage
 
-### Running the App
-```
+### Streamlit App
+
 1. Navigate to http://localhost:8501
 2. Enter ingredients (e.g., "chicken, rice, bell peppers")
 3. Optionally specify dietary restrictions (e.g., "gluten-free, vegetarian")
@@ -71,17 +83,43 @@ streamlit run app.py
 5. Toggle "Debug Mode" to view retrieval results without LLM generation
 6. Submit query
 7. Receive adapted recipe with source citation
+
+### REST API
+
+Start the API server:
+```bash
+uvicorn api:app --reload
+```
+
+**Endpoints:**
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check — shows component status |
+| POST | `/search` | Search recipes, returns raw chunks |
+| POST | `/generate` | Search + LLM generation, returns formatted recipe |
+
+**Interactive docs:** http://localhost:8000/docs (Swagger UI)
+
+**Example request:**
+```bash
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "I have chicken and rice, what can I make?", "use_reranking": true}'
 ```
 
 ### Running Evaluation
 ```bash
 # Requires Groq API key in .env
-python evaluation.py
+python evaluation.py              # Run with default output
+python evaluation.py --verbose    # Show debug output
+python evaluation.py --quiet      # Only show errors
 
 # Generates:
 # - evaluation_results.csv (raw scores)
 # - evaluation_results_report.txt (summary)
 ```
+
+Evaluates 15 test cases across 5 categories (ingredients, dietary, budget, cuisine, meal type) against 4 retrieval methods.
 
 ## Project Structure
 
@@ -91,13 +129,16 @@ smart-pantry/
 │   ├── __init__.py             # Package exports
 │   ├── config.py               # Centralized configuration (single source of truth)
 │   ├── embeddings.py           # Embedding model + vectorstore initialization
-│   └── retrieval.py            # RRF fusion, cross-encoder reranking, search
-├── tests/                      # pytest test suite
+│   ├── retrieval.py            # RRF fusion, cross-encoder reranking (cached), search
+│   └── llm.py                  # LLM initialization, recipe generation, prompt template
+├── tests/                      # pytest test suite (26 tests)
 │   ├── conftest.py             # Shared fixtures (mock recipe data)
-│   └── test_retrieval.py       # Tests for RRF and format_context
-├── app.py                      # Streamlit UI + LLM generation
+│   ├── test_retrieval.py       # Tests for RRF and format_context
+│   ├── test_ingest.py          # Tests for PDF discovery and document splitting
+│   └── test_search.py          # Tests for hybrid search pipeline (mocked)
+├── app.py                      # Streamlit UI (cached initialization via @st.cache_resource)
 ├── ingest.py                   # PDF processing + batch ingestion + deduplication
-├── evaluation.py               # RAGAS evaluation framework
+├── evaluation.py               # RAGAS evaluation framework (imports from core only)
 ├── requirements.txt            # Python dependencies
 ├── pytest.ini                  # Test configuration
 ├── .env                        # API credentials (gitignored)
@@ -137,7 +178,7 @@ python -m pytest tests/ -v
 python -m pytest tests/test_retrieval.py::TestReciprocalRankFusion -v
 ```
 
-11 unit tests covering RRF fusion and context formatting.
+26 unit tests covering RRF fusion, context formatting, PDF ingestion, and hybrid search.
 
 ## Troubleshooting
 
@@ -169,6 +210,17 @@ See `EVALUATION_RESULTS.md` for detailed analysis.
 - **Vector DB**: $0 (local)
 - **Generation**: ~$0.0001/query (Gemini free tier: 1500 req/day)
 - **Total**: **Free** for typical usage
+
+## Design Decisions
+
+### Why local embeddings instead of Google's Embedding API?
+Google's Embedding API hit rate limits (429 errors) immediately on the free tier. Since embeddings are a bulk operation during ingestion, local HuggingFace models (`all-MiniLM-L6-v2`, 384-dim) provide unlimited free embedding at the cost of slightly lower dimensionality vs Google's 768-dim — a worthwhile tradeoff for recipe matching.
+
+### Why hybrid search instead of pure semantic?
+Semantic search understands meaning ("poultry" matches "chicken") but can miss exact ingredient names. BM25 keyword search catches exact terms ("2 cups flour") but misses synonyms. Combining both with Reciprocal Rank Fusion (RRF) achieves **100% recall** — users never miss relevant recipes — while cross-encoder reranking on top brings answer relevancy to its highest at 59.5%.
+
+### Why a separate evaluation framework?
+Without measurement, "better" is just a feeling. The RAGAS evaluation framework compares 4 retrieval methods across 4 metrics, providing data-backed evidence that hybrid + reranking is the best approach. This caught a non-obvious finding: pure semantic search has *higher precision* (79.6% vs 66.8%) but *lower final answer quality* (58.7% vs 59.5%) — the LLM filters noisy context effectively.
 
 ## License
 
